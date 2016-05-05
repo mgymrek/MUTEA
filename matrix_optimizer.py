@@ -39,7 +39,7 @@ class MATRIX_OPTIMIZER:
         # Compute powers of 2 up to 2^13
         powers_of_two = []
         cur_matrix    = self.per_gen_matrix
-        for i in xrange(1, 20):
+        for i in xrange(1, 30):
             powers_of_two.append(cur_matrix)
             cur_matrix = numpy.dot(cur_matrix, cur_matrix)
         self.powers_of_two = powers_of_two
