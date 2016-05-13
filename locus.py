@@ -162,7 +162,7 @@ class Locus:
             for r in records:
                 chrom, start, end, tmrca, sample, a1, a2, period, asd = r
                 tmrca = int(float(tmrca)); a1 = int(a1); a2 = int(a2); period = int(period)
-                self.data.append((tmrca, a1/period, a2/period))
+                self.data.append((tmrca, a1/period, a2/period, (a2-a1)**2/period**2))
                 if tmrca > self.maxt: self.maxt = tmrca
                 if a1 < self.minstr: self.minstr = a1
                 if a2 < self.minstr: self.minstr = a2
@@ -207,25 +207,16 @@ class Locus:
     def DetermineSampleASDLogLikelihood(self, sample_index, allele_range, mut_model, optimizer, \
                                             debug=False):
         # TODO use gt posteriors to weight over possible ASDs
-        tmrca, a1, a2 = self.data[sample_index]
-        asd = (a2-a1)**2
-        # Get transition matrix
-        trans_matrix = optimizer.get_transition_matrix(tmrca)
-        # Get allele freqs based on root node of 0
-        afreqs = np.array(trans_matrix[:, allele_range])
-        # Shift afreqs by sqrt(asd)
-        shift = int(np.sqrt(asd)*-1)
-        afreqs_shifted = np.roll(afreqs, shift)
-        if shift != 0:
-            afreqs_shifted[shift:] = 0
-        # Dot product to get P(asd)
-        prob = float(afreqs.transpose().dot(afreqs_shifted))+SMALLNUM
+        tmrca, a1, a2, asd = self.data[sample_index]
+        afreqs = optimizer.get_afreqs(tmrca)
+        # Get prob
+        shift = int(np.sqrt(asd))
+        prob = float(sum([afreqs[i]*afreqs[i+shift] for i in range(len(afreqs)-shift)]))+SMALLNUM
         return np.log(prob)
 
     def DetermineTotalLogLikelihood(self, allele_range, mut_model, optimizer, keep, debug=False):
         loglik = 0
         # Process each sample independently
-#        for i in range(len(self.data)):
         for i in keep:
             loglik += self.DetermineSampleASDLogLikelihood(i, allele_range, mut_model, optimizer, debug=debug)
         return loglik

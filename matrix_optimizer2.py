@@ -27,6 +27,7 @@ class MATRIX_OPTIMIZER:
         self.N              = per_gen_matrix.shape[0]
         self.min_n          = min_n
         self.memoized_matries = {}
+        self.memoized_afreqs = {}
         self.powers_of_two = {} # i->2^i
 
     def precompute_results(self, tmrcas):
@@ -45,11 +46,15 @@ class MATRIX_OPTIMIZER:
             powers = factor_power_two(t)
             res = reduce(lambda x, y: np.dot(x, y), map(lambda x: self.powers_of_two[x], powers))
             self.memoized_matrices[t] = np.clip(res, 1e-10, 1.0) # clip here since we don't reuse
-
+            self.memoized_afreqs[t] = np.array(res[:, self.N/2])
     def get_transition_matrix(self, num_generations):
         if num_generations not in self.memoized_matrices:
             ERROR("Did not memoize %s"%num_generations)
         return self.memoized_matrices[num_generations]
+    def get_afreqs(self, num_generations):
+        if num_generations not in self.memoized_afreqs:
+            ERROR("Did not memoize %s"%num_generations)
+        return self.memoized_afreqs[num_generations]
 
 if __name__ == "__main__":
     mut_model = mutation_model.OUGeomSTRMutationModel(0.9, 0.001, 0.3, 5)
