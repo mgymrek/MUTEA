@@ -46,7 +46,9 @@ def GetLocusNegLogLikelihood(locus, mu, mu_bounds, \
 
 def GetProbAvg(nll_values):
     # TODO precision?
-    return -1*np.log(np.mean([np.exp(-1*val) for val in nll_values]))
+    logsump = reduce(lambda x, y: np.logaddexp(x, y), map(lambda x: -1*x, nll_values))
+    return -1*(logsump - np.log(len(nll_values)))
+#    return -1*np.log(np.mean([np.exp(-1*val) for val in nll_values]))
 
 class JointLocus:
     def __init__(self, _locilist, _ires=10, _numproc=1):
@@ -77,7 +79,7 @@ class JointLocus:
         if drawmu:
             if sd < sd_bounds[0] or sd > sd_bounds[1]: return np.inf
         # Loop over each locus
-        locnlogliks = joblib.Parallel(n_jobs=self.numproc, batch_size=10)(joblib.delayed(GetLocusNegLL)(self.loci[i], drawmu, params, feature_param_index, numfeatures, mu, sd, \
+        locnlogliks = joblib.Parallel(n_jobs=self.numproc)(joblib.delayed(GetLocusNegLL)(self.loci[i], drawmu, params, feature_param_index, numfeatures, mu, sd, \
                                          mu_bounds, beta_bounds, pgeom_bounds, ires=self.ires, debug=debug) for \
                            i in range(len(self.loci)))
         return sum(locnlogliks)
@@ -127,7 +129,7 @@ class JointLocus:
         def wraps(x):
             args[var] = x
             return func(args)
-        return scipy.misc.derivative(wraps, point[var], n=n, dx=1e-2)
+        return scipy.misc.derivative(wraps, point[var], n=n, dx=1e-3)
 
     def GetLogLikelihoodSecondDeriv(self, dim1, dim2, numfeatures, drawmu, \
                                         mu_bounds=None, beta_bounds=None, pgeom_bounds=None, sd_bounds=None):

@@ -255,20 +255,26 @@ class Locus:
             return func(args)
         return scipy.misc.derivative(wraps, point[var], n=n, dx=1e-3)
 
-    def GetLogLikelihoodSecondDeriv(self, mu_bounds=None, beta_bounds=None, pgeom_bounds=None):
-        # 2nd derivative wrt mu
-        deriv = self.PartialDerivative(lambda x: -1*self.NegativeLogLikelihood(x[0], x[1], x[2], range(len(self.data)), \
-                                                                                  mu_bounds=mu_bounds, \
-                                                                                  beta_bounds=beta_bounds, \
-                                                                                  pgeom_bounds=pgeom_bounds), \
-                                          var=0, n=2, point=self.best_res.x)
-        return deriv
+    def GetLogLikelihoodSecondDeriv(self, dim1, dim2, mu_bounds=None, beta_bounds=None, pgeom_bounds=None):
+        deriv1_fnc = (lambda y: self.PartialDerivative(lambda x: -1*self.NegativeLogLikelihood(x[0], x[1], x[2], range(len(self.data)), \
+                                                                                                   mu_bounds=mu_bounds, \
+                                                                                                   beta_bounds=beta_bounds, \
+                                                                                                   pgeom_bounds=pgeom_bounds), \
+                                                           var=dim1, n=1, point=y))
+        deriv2 = self.PartialDerivative(deriv1_fnc, var=dim2, n=1, point=self.best_res.x)
+        return deriv2
     
     def GetFisherInfo(self, mu_bounds=None, beta_bounds=None, pgeom_bounds=None):
         if self.best_res is None: return
-        fisher_info = -1*self.GetLogLikelihoodSecondDeriv(mu_bounds=mu_bounds, \
-                                                              beta_bounds=beta_bounds, \
-                                                              pgeom_bounds=pgeom_bounds)
+        nf = 1 # TODO why doesn't it work to calculate whole 3x3 matrix? not nice curve wrt beta and p it seems
+        fisher_info = np.zeros((nf, nf))
+        for i in range(nf):
+            for j in range(nf):
+                fisher_info[i,j] = -1*self.GetLogLikelihoodSecondDeriv(i, j, \
+                                                                           mu_bounds=mu_bounds, \
+                                                                           beta_bounds=beta_bounds, \
+                                                                           pgeom_bounds=pgeom_bounds)
+        print fisher_info
         return fisher_info
 
     def GetJackknifeStderr(self, mu_bounds=None, beta_bounds=None, pgeom_bounds=None):
@@ -286,7 +292,8 @@ class Locus:
         if self.best_res is None: return
         if self.stderrs_method == "fisher" or self.stderrs_method == "both":
             fisher_info = self.GetFisherInfo(mu_bounds=mu_bounds, beta_bounds=beta_bounds, pgeom_bounds=pgeom_bounds)
-            self.stderr.append(np.sqrt(1/fisher_info))
+            self.stderr.extend(np.sqrt(np.diagonal(inv(fisher_info))))
+#            self.stderr.append(np.sqrt(1/fisher_info))
         if self.stderrs_method == "jackknife" or self.stderrs_method == "both":
             self.stderr.append(self.GetJackknifeStderr(mu_bounds=mu_bounds, beta_bounds=beta_bounds, pgeom_bounds=pgeom_bounds))
         if self.stderrs_method not in ["fisher","jackknife","both"]:
