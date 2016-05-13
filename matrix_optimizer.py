@@ -26,12 +26,13 @@ class MATRIX_OPTIMIZER:
         self.per_gen_matrix = per_gen_matrix
         self.N              = per_gen_matrix.shape[0]
         self.min_n          = min_n
+        self.num_memo       = 128
 
     def precompute_results(self):
         # Compute transition matrices for 0-128 generations
         memoized_matrices = []
         cur_matrix = numpy.matrix(numpy.identity(self.N)) # Crazy bad things happen if this is an array instead of a matrix, but code still runs
-        for i in xrange(0, 129):
+        for i in xrange(0, self.num_memo+1):
             memoized_matrices.append(cur_matrix)
             cur_matrix = numpy.dot(cur_matrix, self.per_gen_matrix)
         self.memoized_matrices = memoized_matrices
@@ -45,7 +46,7 @@ class MATRIX_OPTIMIZER:
         self.powers_of_two = powers_of_two
 
     def get_transition_matrix(self, num_generations):
-        if num_generations <= 128:
+        if num_generations <= self.num_memo:
             res = self.memoized_matrices[num_generations]
         else:
             v1, powers = factor(num_generations)
