@@ -175,35 +175,6 @@ class Locus:
     def callback_function(self, val):
         print("Current parameters: mu=%f\tbeta=%f\tp=%f"%(val[0], val[1], val[2]))
 
-    def SampleAllele(self, afreqs, allele_range):
-        choices = zip(range(-1*allele_range, allele_range+1), afreqs)
-        total = sum(w for c, w in choices)
-        r = random.uniform(0, total)
-        upto = 0
-        for c, w in choices:
-            if upto + w >= r:
-                return c
-            upto += w
-        assert False, "Shouldn't get here"
-
-    def GenerateRandomSampleData(self, ind, mu, beta, pgeom, allele_range, optimizer):
-        # Get transition matrix and afreqs
-        trans_matrix = optimizer.get_transition_matrix(self.data[ind][0])
-        afreqs = np.array(trans_matrix[:, allele_range])
-        # Sample 2 alleles
-        a1 = self.SampleAllele(afreqs, allele_range)
-        a2 = self.SampleAllele(afreqs, allele_range)
-        asd = (a2-a1)**2
-        return asd
-        
-    def GenerateRandomData(self, mu, beta, pgeom):
-        mut_model, allele_range = GenerateMutationModel([self], mu, beta, pgeom)
-        optimizer = GenerateOptimizer(mut_model, [item[0] for item in self.data])
-        data = []
-        for i in range(len(self.data)):
-            data.append(self.GenerateRandomSampleData(i, mu, beta, pgeom, allele_range, optimizer))
-        return np.array(data)
-
     def DetermineSampleASDLogLikelihood(self, sample_index, allele_range, mut_model, optimizer, \
                                             debug=False):
         # TODO use gt posteriors to weight over possible ASDs
@@ -235,7 +206,7 @@ class Locus:
         # Create mutation model
         if mut_model is None:
             mut_model, allele_range = GenerateMutationModel([self], mu, beta, pgeom)
-            if mut_model is None: return -1*np.inf
+            if mut_model is None: return np.inf
 
         # Create optimizer
         if optimizer is None:

@@ -2,6 +2,7 @@
 Store info for joint estimation across loci
 """
 
+import joblib
 import numpy as np
 import random
 import scipy.integrate
@@ -15,8 +16,40 @@ def ERROR(msg):
 def MSG(msg):
     sys.stderr.write(msg.strip() + "\n")
 
+def GetLocusNegLL(locus, drawmu, params, feature_param_index, numfeatures, mu, sd, \
+                      mu_bounds, beta_bounds, pgeom_bounds, ires=100, debug=False):
+    # Adjust mu for features
+    adj_mu = mu + sum([locus.features[j]*params[j+feature_param_index] for j in range(numfeatures)])
+    if drawmu:
+        adj_sd = sd + sum([locus.features[j]*params[j+feature_param_index+numfeatures] for j in range(numfeatures)])
+        # Draw samples for mu
+        musamples = np.random.normal(loc=adj_mu, scale=adj_sd, size=ires)
+    else:
+        musamples = [adj_mu]
+    # Approximate integration of P(D|mu)P(u)du
+    nll_values = [GetLocusNegLogLikelihood(locus, mval, mu_bounds, \
+                                               beta_bounds, pgeom_bounds, debug=debug) for mval in musamples]
+    if -1*np.inf in nll_values: return -1*np.inf
+    nll = GetProbAvg(nll_values)
+    return nll
+
+def GetLocusNegLogLikelihood(locus, mu, mu_bounds, \
+                                 beta_bounds, pgeom_bounds, debug=False):
+    beta = np.random.uniform(*beta_bounds)
+    pgeom = np.random.uniform(*pgeom_bounds)
+    if locus.prior_beta is not None: beta = locus.prior_beta
+    if locus.prior_pgeom is not None: pgeom = locus.prior_pgeom
+    val = locus.NegativeLogLikelihood(mu, beta, pgeom, range(len(locus.data)), \
+                                          mu_bounds=mu_bounds, beta_bounds=beta_bounds, pgeom_bounds=pgeom_bounds, \
+                                          mut_model=None, allele_range=None, optimizer=None, debug=debug)
+    return val
+
+def GetProbAvg(nll_values):
+    # TODO precision?
+    return -1*np.log(np.mean([np.exp(-1*val) for val in nll_values]))
+
 class JointLocus:
-    def __init__(self, _locilist, _ires=10):
+    def __init__(self, _locilist, _ires=10, _numproc=1):
         self.loci = _locilist
         self.best_res = None
         self.numiter = 3
@@ -24,6 +57,7 @@ class JointLocus:
         self.max_cycle_per_iter = 250
         self.ires = _ires
         self.stderrs = []
+        self.numproc = _numproc
 
     def callback_function(self, val):
         print("Current parameters: %s"%(str(val)))
@@ -33,6 +67,7 @@ class JointLocus:
         # Order of params: [mu0, mu_coeff1, mu_coeff2, mu_coeff3...] if drawmu=False
         # Order of params: [mu0, sd0, mu_coeff1, coeff2, ... sd_coeff1, sd_coeff2,...] if drawmu=True
         mu = params[0]
+        sd = None
         feature_param_index = 1
         if drawmu:
             sd = params[1]
@@ -42,42 +77,10 @@ class JointLocus:
         if drawmu:
             if sd < sd_bounds[0] or sd > sd_bounds[1]: return np.inf
         # Loop over each locus
-        nloglik = 0
-        for i in range(len(self.loci)):
-            # Adjust mu for features
-            adj_mu = mu + sum([self.loci[i].features[j]*params[j+feature_param_index] for j in range(numfeatures)])
-            if drawmu:
-                adj_sd = sd + sum([self.loci[i].features[j]*params[j+feature_param_index+numfeatures] for j in range(numfeatures)])
-                # Draw samples for mu
-                musamples = np.random.normal(loc=adj_mu, scale=adj_sd, size=self.ires)
-            else:
-                musamples = [adj_mu]
-            # Approximate integration of P(D|mu)P(u)du
-            nll_values = [self.GetLocusNegLogLikelihood(i, mval, mu_bounds, \
-                                                            beta_bounds, pgeom_bounds, debug=debug) for mval in musamples]
-            nll = self.GetProbAvg(nll_values)
-            if debug: MSG("Locus %s:%s, features: %s, params %s, nll %s"%(self.loci[i].chrom, self.loci[i].start, \
-                                                                              str(self.loci[i].features), str(params), nll))
-            nloglik += nll
-            if nloglik >= np.inf: return nloglik # no point in continuing...
-        if debug: MSG("Params %s, Likelihood %s"%(str(params), nloglik))
-        return nloglik
-
-    def GetProbAvg(self, nll_values):
-        # TODO precision?
-        return -1*np.log(np.mean([np.exp(-1*val) for val in nll_values]))
-
-    def GetLocusNegLogLikelihood(self, locindex, mu, mu_bounds, \
-                                     beta_bounds, pgeom_bounds, debug=False):
-        locus = self.loci[locindex]
-        beta = np.random.uniform(*beta_bounds)
-        pgeom = np.random.uniform(*pgeom_bounds)
-        if locus.prior_beta is not None: beta = locus.prior_beta
-        if locus.prior_pgeom is not None: pgeom = locus.prior_pgeom
-        val = locus.NegativeLogLikelihood(mu, beta, pgeom, range(len(locus.data)), \
-                                              mu_bounds=mu_bounds, beta_bounds=beta_bounds, pgeom_bounds=pgeom_bounds, \
-                                              mut_model=None, allele_range=None, optimizer=None, debug=debug)
-        return val
+        locnlogliks = joblib.Parallel(n_jobs=self.numproc, batch_size=10)(joblib.delayed(GetLocusNegLL)(self.loci[i], drawmu, params, feature_param_index, numfeatures, mu, sd, \
+                                         mu_bounds, beta_bounds, pgeom_bounds, ires=self.ires, debug=debug) for \
+                           i in range(len(self.loci)))
+        return sum(locnlogliks)
 
     def LoadData(self):
         toremove = []

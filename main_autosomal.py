@@ -169,7 +169,7 @@ def main():
 
     # Run estimation
     if args.joint:
-        jlocus = jointlocus.JointLocus(loci, _ires=args.ires)
+        jlocus = jointlocus.JointLocus(loci, _ires=args.ires, _numproc=args.numproc)
         MSG("[main_autosomal.py] Processing joint locus with %s loci..."%(len(jlocus.loci)))
         jlocus.MaximizeLikelihood(mu_bounds=(args.min_mu, args.max_mu), \
                                       sd_bounds=(args.min_sd, args.max_sd), \
