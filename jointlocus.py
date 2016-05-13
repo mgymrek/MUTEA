@@ -6,6 +6,7 @@ import numpy as np
 import random
 import scipy.integrate
 import sys
+from numpy.linalg import inv
 
 def ERROR(msg):
     sys.stderr.write(msg.strip() + "\n")
@@ -18,10 +19,11 @@ class JointLocus:
     def __init__(self, _locilist, _ires=10):
         self.loci = _locilist
         self.best_res = None
-        self.numiter = 2
+        self.numiter = 3
         self.method = "Nelder-Mead"
         self.max_cycle_per_iter = 250
         self.ires = _ires
+        self.stderrs = []
 
     def callback_function(self, val):
         print("Current parameters: %s"%(str(val)))
@@ -72,9 +74,9 @@ class JointLocus:
         pgeom = np.random.uniform(*pgeom_bounds)
         if locus.prior_beta is not None: beta = locus.prior_beta
         if locus.prior_pgeom is not None: pgeom = locus.prior_pgeom
-        val = locus.NegativeLogLikelihood(mu, beta, pgeom, \
-                                              mu_bounds, beta_bounds, pgeom_bounds, \
-                                              None, None, None, debug=debug)
+        val = locus.NegativeLogLikelihood(mu, beta, pgeom, range(len(locus.data)), \
+                                              mu_bounds=mu_bounds, beta_bounds=beta_bounds, pgeom_bounds=pgeom_bounds, \
+                                              mut_model=None, allele_range=None, optimizer=None, debug=debug)
         return val
 
     def LoadData(self):
@@ -114,7 +116,44 @@ class JointLocus:
                 best_res = res
         self.best_res = best_res
 
+        # Calculate stderr
+        self.CalculateStdErrors(drawmu=drawmu, mu_bounds=mu_bounds, beta_bounds=beta_bounds, pgeom_bounds=pgeom_bounds, sd_bounds=sd_bounds)
+
+    def PartialDerivative(self, func, var=0, n=1, point=[]):
+        args = point[:]
+        def wraps(x):
+            args[var] = x
+            return func(args)
+        return scipy.misc.derivative(wraps, point[var], n=n, dx=1e-2)
+
+    def GetLogLikelihoodSecondDeriv(self, dim1, dim2, numfeatures, drawmu, \
+                                        mu_bounds=None, beta_bounds=None, pgeom_bounds=None, sd_bounds=None):
+        deriv1_fnc = (lambda y: self.PartialDerivative(lambda x: -1*self.NegativeLogLikelihood(x, numfeatures, drawmu, \
+                                                                                                   mu_bounds, \
+                                                                                                   sd_bounds, \
+                                                                                                   beta_bounds, \
+                                                                                                   pgeom_bounds), \
+                                                           var=dim1, n=1, point=y))
+        deriv2 = self.PartialDerivative(deriv1_fnc, var=dim2, n=1, point=self.best_res.x)
+        return deriv2
+
+    def GetFisherInfo(self, drawmu=False, mu_bounds=None, beta_bounds=None, pgeom_bounds=None, sd_bounds=None):
+        if self.best_res is None: return
+        numfeatures = len(self.loci[0].features)
+        numparams = (1+numfeatures)*(1+drawmu)
+        fisher_info = np.zeros((numparams, numparams))
+        for i in range(numparams):
+            for j in range(numparams):
+                fisher_info[i,j] = -1*self.GetLogLikelihoodSecondDeriv(i, j, numfeatures, drawmu, \
+                                                                           mu_bounds=mu_bounds, beta_bounds=beta_bounds, pgeom_bounds=pgeom_bounds, \
+                                                                           sd_bounds=sd_bounds)
+        return fisher_info
+
+    def CalculateStdErrors(self, drawmu=False, mu_bounds=None, beta_bounds=None, pgeom_bounds=None, sd_bounds=None):
+        fisher_info = self.GetFisherInfo(drawmu=drawmu, mu_bounds=mu_bounds, beta_bounds=beta_bounds, pgeom_bounds=pgeom_bounds, sd_bounds=sd_bounds)
+        self.stderrs = list(np.sqrt(np.diagonal(inv(fisher_info))))
+
     def PrintResults(self, out):
         if self.best_res is None: return
-        out.write("\t".join(map(str, ["JOINT"]+list(self.best_res.x) + ["%s loci"%len(self.loci)]))+"\n")
+        out.write("\t".join(map(str, ["JOINT"]+list(self.best_res.x) + self.stderrs + ["%s loci"%len(self.loci)]))+"\n")
         out.flush()

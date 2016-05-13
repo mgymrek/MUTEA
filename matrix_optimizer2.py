@@ -1,5 +1,6 @@
 import numpy as np
 import mutation_model
+import sys
 
 def ERROR(msg):
     sys.stderr.write(msg.strip() + "\n")
@@ -44,7 +45,9 @@ class MATRIX_OPTIMIZER:
         for t in set(tmrcas):
             # Which powers of two do we need
             powers = factor_power_two(t)
-            res = reduce(lambda x, y: np.dot(x, y), map(lambda x: self.powers_of_two[x], powers))
+            if len(powers) == 0:
+                res = self.per_gen_matrix
+            else: res = reduce(lambda x, y: np.dot(x, y), map(lambda x: self.powers_of_two[x], powers))
             self.memoized_matrices[t] = np.clip(res, 1e-10, 1.0) # clip here since we don't reuse
             self.memoized_afreqs[t] = np.array(res[:, self.N/2])
     def get_transition_matrix(self, num_generations):
@@ -59,5 +62,5 @@ class MATRIX_OPTIMIZER:
 if __name__ == "__main__":
     mut_model = mutation_model.OUGeomSTRMutationModel(0.9, 0.001, 0.3, 5)
     mo = MATRIX_OPTIMIZER(mut_model.trans_matrix, mut_model.min_n)
-    mo.precompute_results([4,100,1000])
+    mo.precompute_results([0,4,100,1000])
 
