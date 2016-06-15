@@ -2,16 +2,27 @@ import collections
 import genotypers
 import numpy
 import operator
+import sys
 import vcf
+
+def ERROR(msg):
+    sys.stderr.write(msg.strip() + "\n")
+    sys.exit(1)
 
 # Returns a dictionary mapping each sample name to a dictionary 
 # containing the observed repeat lengths and counts for that sample's reads
-def get_str_read_counts(vcf_reader):
+def get_str_read_counts(vcf_reader, uselocus=None):
     # Attempt to read record from VCF
-    try:
-        record = vcf_reader.next()
-    except StopIteration:
-        return False, "N/A", -1, -1, -1, {}, -1, -1, None
+    if uselocus is not None:
+        loci = list(vcf_reader.fetch(*uselocus))
+        if len(loci) != 1:
+            return False, "N/A", -1, -1, -1, {}, -1, -1, None
+        record = loci[0]
+    else:
+        try:
+            record = vcf_reader.next()
+        except StopIteration:
+            return False, "N/A", -1, -1, -1, {}, -1, -1, None
 
     # Determine most common frame
     if 'MOTIF' in record.INFO:
@@ -21,7 +32,7 @@ def get_str_read_counts(vcf_reader):
     frame_counts = collections.defaultdict(int)
     for sample in record:
         if sample['GT'] is not None:
-            key = 'ALLREADS' if 'ALLREADS' in sample.data else 'MALLREADS'
+            key = 'ALLREADS' if hasattr(sample.data, 'ALLREADS') else 'MALLREADS'
             if sample[key] is None:
                 continue
 
@@ -53,6 +64,88 @@ def get_str_read_counts(vcf_reader):
                 out_frame_count += 1
     str_key = record.ID if record.ID is not None else record.CHROM+":"+str(record.POS)
     return True,record.CHROM,record.POS,record.INFO['END'],motif_len,sample_read_count_dict, in_frame_count, out_frame_count, str_key
+
+def get_sample_tmrcas(vcf_reader, uselocus=None):
+    # Attempt to read record from VCF
+    if uselocus is not None:
+        loci = list(vcf_reader.fetch(*uselocus))
+        if len(loci) != 1:
+            return {}
+        record = loci[0]
+    else:
+        try:
+            record = vcf_reader.next()
+        except StopIteration:
+            return {}
+    tmrcas = {}
+    for sample in record:
+        if hasattr(sample, "TMRCA"): tmrcas[sample.sample] = sample["TMRCA"]
+        else: tmrcas[sample.sample] = 0
+    return tmrcas
+
+def get_str_gts_diploid(vcf_reader, uselocus=None):
+    # Attempt to read record from VCF
+    if uselocus is not None:
+        loci = list(vcf_reader.fetch(*uselocus))
+        if len(loci) != 1:
+            return False, {}, -1, -1, None
+        record = loci[0]
+    else:
+        try:
+            record = vcf_reader.next()
+        except StopIteration:
+            return False, {}, -1, -1, None
+    
+    # Get all lengths
+    all_lens = []
+    for sample in record:
+        if sample["GT"] is not None:
+            for gt in map(int, sample["GT"].split("/")):
+                all_lens.append(len(str(record.alleles[gt])))
+
+    # Determine most common frame
+    if 'MOTIF' in record.INFO:
+        motif_len = len(record.INFO['MOTIF'])
+    else:
+        motif_len = record.INFO['PERIOD']
+    all_lens     = sorted(all_lens)
+    frame_counts = motif_len*[0]
+    if len(all_lens) == 0:
+        exit("No samples have a valid genotype for the STR of interest")
+    for length in all_lens:
+        frame_counts[length%motif_len] += 1
+    best_frame, value = max(enumerate(frame_counts), key=operator.itemgetter(1))
+
+    # Utilize median observed allele as "center"
+    all_lens = filter(lambda x: x%motif_len == best_frame, all_lens)
+    all_lens = sorted(all_lens)
+    center   = all_lens[len(all_lens)/2]
+    min_str  = (all_lens[0]  - center)/motif_len
+    max_str  = (all_lens[-1] - center)/motif_len
+
+    # Determine genotype posteriors, relative to "center" and in terms of # repeats
+    gt_probs = {}
+    for sample in record:
+        sample_probs = {}
+        if sample["GT"] is None: continue
+        gt1, gt2 = map(int, sample["GT"].split("/"))
+        samplegt = (len(record.alleles[gt1])-center, len(record.alleles[gt2])-center)
+        for i in xrange(len(record.alleles)):
+            for j in xrange(i, len(record.alleles)):
+                if record.alleles[i] is None or record.alleles[j] is None: continue
+                if len(record.alleles[i])%motif_len != best_frame or len(record.alleles[j])%motif_len != best_frame: continue
+                repeat_diffs = ( (len(record.alleles[i])-center)/motif_len, (len(record.alleles[j])-center))
+                post = int(samplegt==repeat_diffs)
+                if repeat_diffs in sample_probs:
+                    sample_probs[repeat_diffs] += post
+                else: sample_probs[repeat_diffs] = post
+        gt_probs[sample.sample] = sample_probs
+        
+    if record.ID is not None:
+        str_key = record.ID
+    else:
+        str_key = record.CHROM + ":" + str(record.POS)
+    return True, gt_probs, min_str, max_str, str_key, motif_len
 
 def get_str_gts(vcf_reader):
     # Attempt to read record from VCF
@@ -134,13 +227,13 @@ def compute_median(values, counts):
         target_val -= counts[i]
     return values[-1]
 
-def counts_to_centalized_posteriors(sample_read_counts, p_geom, down, up):
+def counts_to_centalized_posteriors(sample_read_counts, p_geom, down, up, diploid=False):
     # Compute the minimum and maximum observed allele
     min_allele = min(map(lambda x: min(x.keys()), sample_read_counts.values()))
     max_allele = max(map(lambda x: max(x.keys()), sample_read_counts.values()))
 
     # Create the stutter genotyper
-    genotyper = genotypers.EstStutterGenotyper()
+    genotyper = genotypers.EstStutterGenotyper(_diploid=diploid)
     genotyper.create(down, up, p_geom, min_allele, max_allele)
 
     # Compute genotype posteriors using genotyper
@@ -152,7 +245,10 @@ def counts_to_centalized_posteriors(sample_read_counts, p_geom, down, up):
     gt_counts = collections.defaultdict(int)
     for posteriors in gt_posteriors.values():
         for gt,prob in  posteriors.items():
-            gt_counts[gt] += prob
+            if diploid:
+                gt_counts[gt[0]] += prob
+                gt_counts[gt[1]] += prob
+            else: gt_counts[gt] += prob
     count_items = sorted(gt_counts.items())
     center      = compute_median(map(lambda x: x[0], count_items), map(lambda x: x[1], count_items))
     print("CENTRAL ALLELE = %d"%(center))
@@ -162,6 +258,8 @@ def counts_to_centalized_posteriors(sample_read_counts, p_geom, down, up):
     for sample,posteriors in gt_posteriors.items():
         new_posteriors = {}
         for gt,prob in posteriors.items():
-            new_posteriors[gt-center] = prob
+            if diploid:
+                new_posteriors[(gt[0]-center, gt[1]-center)] = prob
+            else: new_posteriors[gt-center] = prob
         norm_gt_posteriors[sample] = new_posteriors
     return norm_gt_posteriors,min_allele-center,max_allele-center

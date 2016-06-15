@@ -4,7 +4,7 @@ from numpy.linalg import matrix_power
 from numpy import linalg as LA
 
 class OUGeomSTRMutationModel:
-    def __init__(self, p_geom, mu, beta, allele_range, max_step=None):
+    def __init__(self, p_geom, mu, beta, allele_range, max_step=None, len_coeff=0.0, a0=0):
         if p_geom <= 0.0 or p_geom > 1:
             exit("Invalid geometric distribution probability = %f"%p_geom)
 
@@ -30,6 +30,8 @@ class OUGeomSTRMutationModel:
         self.mu             = mu
         self.beta           = beta
         self.p_geom         = p_geom
+        self.len_coeff      = len_coeff
+        self.a0             = a0
         self.init_transition_matrix()
 
         # Memoized matrix info
@@ -54,11 +56,12 @@ class OUGeomSTRMutationModel:
             down_prob    = 1.0-up_prob
             lrem         = sum(step_probs[i-min_n-1:])
             rrem         = sum(step_probs[max_n-i-1:])
-            trans_matrix[:,i-min_n] = numpy.hstack((numpy.array([self.mu*down_prob*lrem]),
-                                                    self.mu*down_prob*numpy.array(step_probs[:i-min_n-1][::-1]),
-                                                    numpy.array([1-self.mu]),
-                                                    self.mu*up_prob*numpy.array(step_probs[:max_n-i-1]),
-                                                    numpy.array([self.mu*up_prob*rrem])))
+            mutrate      = 10**(numpy.log10(self.mu)+self.len_coeff*(i-self.a0))
+            trans_matrix[:,i-min_n] = numpy.hstack((numpy.array([mutrate*down_prob*lrem]),
+                                                    mutrate*down_prob*numpy.array(step_probs[:i-min_n-1][::-1]),
+                                                    numpy.array([1-mutrate]),
+                                                    mutrate*up_prob*numpy.array(step_probs[:max_n-i-1]),
+                                                    numpy.array([mutrate*up_prob*rrem])))
 
         # Add boundaries to prevent probability leakage
         trans_matrix[:,0]     = 0

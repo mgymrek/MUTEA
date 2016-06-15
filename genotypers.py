@@ -3,8 +3,15 @@ import numpy
 
 from scipy.misc  import logsumexp
 from scipy.stats import geom
-
+import sys
 import geom_stutter_em
+
+def ERROR(msg):
+    sys.stderr.write(msg.strip() + "\n")
+    sys.exit(1)
+    
+def MSG(msg):
+    sys.stderr.write(msg.strip() + "\n")
 
 # Classes that genotype an STR given a set of reads
 
@@ -88,12 +95,12 @@ class ExactStutterGenotyper:
     def __str__(self):
         return "ExactStutterGenotyper"
 
-
 '''
 Computes the posteriors based on an EM-estimated stutter model and a uniform prior
 '''
 class EstStutterGenotyper:
-    def __init__(self):
+    def __init__(self, _diploid=False):
+        self.diploid = _diploid
         return
 
     def construct_matrix(self, down, up, p_geom, min_allele, max_allele):
@@ -122,9 +129,9 @@ class EstStutterGenotyper:
     def create(self, down, up, p_geom, min_allele, max_allele):
         self.construct_matrix(down, up, p_geom, min_allele, max_allele)
     
-    def train(self, sample_read_counts, min_allele, max_allele):
-        print("Estimating stutter model...")
-        status, eff_coverage, down, up, p_geom, new_LL = geom_stutter_em.run_EM(sample_read_counts)
+    def train(self, sample_read_counts, min_allele, max_allele, debug=False):
+        MSG("Estimating stutter model...")
+        status, eff_coverage, down, up, p_geom, new_LL = geom_stutter_em.run_EM(sample_read_counts, diploid=self.diploid)
         if status == geom_stutter_em.CONVERGED:
             self.status = "CONVERGED"
         elif status == geom_stutter_em.ITERATION_LIMIT:
@@ -146,7 +153,7 @@ class EstStutterGenotyper:
             self.est_down  = down
             self.est_pgeom = p_geom
         
-        print("\tEstimated parameters: P_GEOM=%f, P_DOWN=%f, P_UP=%f"%(p_geom, down, up))
+        MSG("\tEstimated parameters: P_GEOM=%f, P_DOWN=%f, P_UP=%f"%(p_geom, down, up))
         self.construct_matrix(down, up, p_geom, min_allele, max_allele)
         return True
 
@@ -156,9 +163,26 @@ class EstStutterGenotyper:
             if length < self.min_allele or length > self.max_allele:
                 exit("ERROR: Allele length is outside of stutter model's range")
             read_counts_array[length-self.min_allele] = count
-        LLs        = numpy.sum(self.step_probs*read_counts_array, axis=1)
-        posteriors = numpy.exp(LLs-logsumexp(LLs))
-        return dict(zip(range(self.min_allele, self.max_allele+1), posteriors))
+        if self.diploid:
+            num_gts = self.nalleles**2
+            allele_sizes = range(self.min_allele, self.min_allele+self.nalleles)
+            LLs = numpy.zeros(num_gts)
+            gtind = 0
+            keys = []
+            for a1 in xrange(self.nalleles):
+                for a2 in xrange(self.nalleles):
+                    step_probs1 = self.step_probs[a1,:]
+                    step_probs2 = self.step_probs[a2,:]
+                    step_probs = numpy.logaddexp(step_probs1, step_probs2)+numpy.log(0.5)
+                    LLs[gtind] = numpy.sum(read_counts_array*step_probs)
+                    keys.append((allele_sizes[a1], allele_sizes[a2]))
+                    gtind += 1
+            posteriors = numpy.exp(LLs-logsumexp(LLs))
+            return dict(zip(keys, posteriors))
+        else:
+            LLs        = numpy.sum(self.step_probs*read_counts_array, axis=1)
+            posteriors = numpy.exp(LLs-logsumexp(LLs))
+            return dict(zip(range(self.min_allele, self.max_allele+1), posteriors))
 
     def __str__(self):
         return "EstStutterGenotyper"

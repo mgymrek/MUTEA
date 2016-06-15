@@ -20,7 +20,11 @@ import jointlocus
 from pycallgraph import PyCallGraph
 from pycallgraph.output import GraphvizOutput
 
-def LoadLocusFeatures(locusfeatures):
+def LoadJointPriors(priorfile):
+    priors = map(lambda x: float(x.strip()), open(priorfile, "r").readlines())
+    return priors
+
+def LoadLocusFeatures(locusfeatures, use_features=None):
     if locusfeatures is None: return None
     features = {}
     numfeatures = 0
@@ -31,6 +35,8 @@ def LoadLocusFeatures(locusfeatures):
             start = int(items[1])
             end = int(items[2])
             fvals = map(float, items[3:])
+            if use_features is not None:
+                fvals = [fvals[i] for i in map(int, use_features.split(","))]
             numfeatures = len(fvals)
             features[(chrom, start, end)] = fvals
     if numfeatures == 0: return features
@@ -48,7 +54,7 @@ def LoadPriors(locuspriors):
     priors = {}
     with open(locuspriors, "r") as f:
         for line in f:
-            chrom, start, end, logmu, beta, pgeom, numsamples = line.strip().split()
+            chrom, start, end, logmu, beta, pgeom = line.strip().split()[0:6]
             start = int(start)
             end = int(end)
             logmu = float(logmu)
@@ -58,9 +64,10 @@ def LoadPriors(locuspriors):
     return priors
 
 def LoadLoci(locfile, datafiles, minsamples, maxsamples, \
-                 locuspriors, locusfeatures, stderrs, jackknife_blocksize):
+                 locuspriors, locusfeatures, use_features, \
+                 stderrs, jackknife_blocksize, isvcf, eststutter, debug=False):
     priors = LoadPriors(locuspriors)
-    features = LoadLocusFeatures(locusfeatures)
+    features = LoadLocusFeatures(locusfeatures, use_features=use_features)
     loci = []
     with open(locfile, "r") as f:
         for line in f:
@@ -68,7 +75,7 @@ def LoadLoci(locfile, datafiles, minsamples, maxsamples, \
             chrom = str(chrom)
             start = int(start)
             end = int(end)
-            loc = locus.Locus(chrom, start, end, datafiles, minsamples, maxsamples, stderrs)
+            loc = locus.Locus(chrom, start, end, datafiles, minsamples, maxsamples, stderrs, isvcf, eststutter, _debug=debug)
             loc.jkblocksize = jackknife_blocksize
             key = (chrom, start, end)
             if priors is not None and key not in priors: continue
@@ -91,6 +98,7 @@ def RunLocus(locus, args=None):
     locus.MaximizeLikelihood(mu_bounds=(args.min_mu, args.max_mu), \
                                  beta_bounds=(args.min_beta, args.max_beta), \
                                  pgeom_bounds=(args.min_pgeom, args.max_pgeom), \
+                                 lencoeff_bounds=(args.min_lencoeff, args.max_lencoeff), \
                                  debug=args.debug)
     # Print intermediate results to stderr so we can track
     outline = locus.GetResultsString()
@@ -108,6 +116,8 @@ def main():
     # I/O data options
     parser.add_argument("--asdhet", help="ASD-Het file. Must be indexed bed file. See help for columns.", type=str, required=True) 
     parser.add_argument("--asdhetdir", help="Is asdhet a directory", action="store_true")
+    parser.add_argument("--vcf", help="Input is a VCF file (not asdhet)", action="store_true")
+    parser.add_argument("--eststutter", help="Estimate stutter model from reads", action="store_true")
     parser.add_argument("--loci", help="Bed file with loci to process. First three columns are chrom, start, end", type=str, required=True)
     parser.add_argument("--out", help="Output file (default stdout)", type=str, required=False)
 
@@ -124,11 +134,17 @@ def main():
     parser.add_argument("--max_beta", required=False, type=float, default=0.9, help="Upper optimization boundary for beta.")
     parser.add_argument("--stderrs", required=False, type=str, default="fisher", help="Method to calc stderrs. Options: fisher, jackknife, both.")
     parser.add_argument("--jackknife_blocksize", required=False, type=int, default=10, help="Jackknife block size.")
+    parser.add_argument("--min_lencoeff", required=False, type=float, default=0.0, help="Lower optimization boundary for lencoeff.")
+    parser.add_argument("--max_lencoeff", required=False, type=float, default=0.0, help="Upper optimization boundary for lencoeff.")
 
     # Joint estimation options
     parser.add_argument("--joint", help="Estimate parameters jointly across loci", action="store_true")
     parser.add_argument("--locus_priors", help="Per-locus results to use as priors. Default: draw from uniform", type=str)
     parser.add_argument("--locus_features", help="Tab file of chrom, start, end, feature1, feature2, ...", type=str)
+    parser.add_argument("--joint_priors", help="File with priors. One line per parameter.", type=str)
+    parser.add_argument("--use_features", help="List of feature numbers to use. (default all)", type=str)
+
+    # Joint estimation options - for drawing mu from distribution TODO
     parser.add_argument("--drawmu", help="Model mu as drawn from a distribution", action="store_true")
     parser.add_argument("--min_sd", required=False, type=float, default=0.001, help="Lower optimization boundary for sd.")
     parser.add_argument("--max_sd", required=False, type=float, default=3, help="Upper optimization boundary for sd.")
@@ -152,13 +168,18 @@ def main():
 
     # Load loci to process
     loci = LoadLoci(args.loci, asdhet, args.min_samples, args.max_samples, \
-                        args.locus_priors, args.locus_features, args.stderrs, args.jackknife_blocksize)
+                        args.locus_priors, args.locus_features, args.use_features, \
+                        args.stderrs, args.jackknife_blocksize, args.vcf, args.eststutter, debug=args.debug)
     if len(loci) > args.maxloci: loci = loci[:args.maxloci]
-    
+
     # Get output
     if args.out is None: output = sys.stdout
     else: output = open(args.out, "w")
 
+    # Load priors
+    if args.joint and args.joint_priors is not None:
+        jpriors = LoadJointPriors(args.joint_priors)
+    else: jpriors = None
 
     ####### Profiling #####
     if args.profile:
@@ -170,11 +191,13 @@ def main():
     # Run estimation
     if args.joint:
         jlocus = jointlocus.JointLocus(loci, _ires=args.ires, _numproc=args.numproc)
+        jlocus.SetPriors(jpriors)
         MSG("[main_autosomal.py] Processing joint locus with %s loci..."%(len(jlocus.loci)))
         jlocus.MaximizeLikelihood(mu_bounds=(args.min_mu, args.max_mu), \
                                       sd_bounds=(args.min_sd, args.max_sd), \
                                       beta_bounds=(args.min_beta, args.max_beta), \
                                       pgeom_bounds=(args.min_pgeom, args.max_pgeom), \
+                                      lencoeff_bounds=(args.min_lencoeff, args.max_lencoeff), \
                                       drawmu=args.drawmu, \
                                       debug=args.debug)
         jlocus.PrintResults(output)
