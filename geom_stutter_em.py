@@ -67,7 +67,7 @@ def run_EM(sample_read_counts, debug=False, diploid=False):
 
         # Reestimate parameters
         log_gt_priors    = recalc_log_pop_priors(log_gt_posteriors)
-        down, up, p_geom = recalc_stutter_params(log_gt_posteriors, read_counts, nalleles, allele_sizes, diploid=diploid)
+        down, up, p_geom = recalc_stutter_params(log_gt_posteriors, read_counts, nalleles, allele_sizes, down, up, p_geom, diploid=diploid)
         if debug:
             MSG("POP PRIORS: %s"%(str(numpy.exp(log_gt_priors))))
 
@@ -108,29 +108,34 @@ def init_log_gt_priors(read_counts, nalleles, diploid=False):
                 gt_counts[allele_index] += 1.0*count/num_reads
     return numpy.log(1.0*gt_counts/gt_counts.sum())
 
-def init_stutter_params(read_counts, allele_sizes, diploid=False):
-    dir_counts = numpy.array([1.0, 1.0, 1.0]) # Pseudocounts
-    diff_sum = 3.0                            # Step sizes of 1 and 2, so that p_geom < 1 
-    for counts in read_counts:
-        num_reads = sum(counts.values())
+"""
         if diploid:
             num_gts = len(allele_sizes)**2
             for a1 in xrange(len(allele_sizes)):
                 for a2 in xrange(len(allele_sizes)):
                     posterior = counts.get(a1, 0)*counts.get(a2, 0)*1.0/num_reads**2
+                    if posterior == 0: continue
                     for read_index, read_count in counts.items():
                         stutter1 = allele_sizes[read_index]-allele_sizes[a1]
                         stutter2 = allele_sizes[read_index]-allele_sizes[a2]
+                        print allele_sizes[read_index], allele_sizes[a1], allele_sizes[a2], stutter1, stutter2
                         if abs(stutter1)<abs(stutter2): sval = stutter1
                         else: sval = stutter2
                         dir_counts[numpy.sign(sval)+1] += posterior*read_count
                         diff_sum += read_count*posterior*abs(sval)
         else:
-            for allele_index,count in counts.items():
-                posterior = 1.0*count/num_reads
-                for read_index,read_count in counts.items():
-                    dir_counts[numpy.sign(read_index-allele_index)+1] += posterior*read_count
-                    diff_sum += read_count*posterior*abs(allele_sizes[read_index]-allele_sizes[allele_index])
+"""
+def init_stutter_params(read_counts, allele_sizes, diploid=False):
+    if diploid: return 0.01, 0.01, 0.9 # Don't bother trying to get posteriors
+    dir_counts = numpy.array([1.0, 1.0, 1.0]) # Pseudocounts -1, 0, 1
+    diff_sum = 3.0                            # Step sizes of 1 and 2, so that p_geom < 1 
+    for counts in read_counts:
+        num_reads = sum(counts.values())
+        for allele_index,count in counts.items():
+            posterior = 1.0*count/num_reads
+            for read_index,read_count in counts.items():
+                dir_counts[numpy.sign(read_index-allele_index)+1] += posterior*read_count
+                diff_sum += read_count*posterior*abs(allele_sizes[read_index]-allele_sizes[allele_index])
     tot_dir_count = sum(dir_counts)
     return dir_counts[0]/tot_dir_count, dir_counts[2]/tot_dir_count, 1.0*(dir_counts[0]+dir_counts[2])/diff_sum
 
@@ -138,7 +143,23 @@ def recalc_log_pop_priors(log_gt_posteriors):
     log_counts = logsumexp(log_gt_posteriors, axis=0)
     return log_counts - logsumexp(log_counts)
 
-def recalc_stutter_params(log_gt_posteriors, read_counts, nalleles, allele_sizes, diploid=False):
+def GetLogTransitionProb(true_allele, obs_allele, down, up, p_geom):
+    stutter_dist = geom(p_geom)
+    log_down, log_eq, log_up = map(numpy.log, [down, 1-down-up, up])
+    if obs_allele - true_allele > 0: logdirprob = log_up
+    elif obs_allele - true_allele < 0: logdirprob = log_down
+    else: return log_eq
+    log_step_prob = stutter_dist.logpmf(abs(obs_allele-true_allele))
+    return logdirprob+log_step_prob
+
+def GetReadPhasePosts(allele1, allele2, read_allele, down, up, pgeom):
+    log_one_half = numpy.log(0.5)
+    log_phase_one = log_one_half + GetLogTransitionProb(allele1, read_allele, down, up, pgeom)
+    log_phase_two = log_one_half + GetLogTransitionProb(allele2, read_allele, down, up, pgeom)
+    log_phase_total = logsumexp([log_phase_one, log_phase_two])
+    return [log_phase_one-log_phase_total, log_phase_two-log_phase_total]
+
+def recalc_stutter_params(log_gt_posteriors, read_counts, nalleles, allele_sizes, down, up, pgeom, diploid=False):
     nsamples   = log_gt_posteriors.shape[0]
     log_counts = [[0], [0], [0]]   # Pseudocounts
     log_diffs  = [0, numpy.log(2)] # Step sizes of 1 and 2, so that p_geom < 1 
@@ -152,10 +173,13 @@ def recalc_stutter_params(log_gt_posteriors, read_counts, nalleles, allele_sizes
                         log_count = numpy.log(count)
                         diff1 = allele_sizes[read_index]-allele_sizes[a1]
                         diff2 = allele_sizes[read_index]-allele_sizes[a2]
-                        for diff in [diff1, diff2]:
-                            if diff != 0:
-                                log_diffs.append(log_count+log_post+log_one_half+numpy.log(abs(diff)))
-                            log_counts[numpy.sign(diff)+1].append(log_post+log_one_half+log_count)
+                        phase_posts = GetReadPhasePosts(allele_sizes[a1], allele_sizes[a2], \
+                                                            allele_sizes[read_index], down, up, pgeom)
+                        diffs = [diff1, diff2]
+                        for j in range(len(diffs)):
+                            if diffs[j] != 0:
+                                log_diffs.append(log_count+log_post+phase_posts[j]+numpy.log(abs(diffs[j])))
+                            log_counts[numpy.sign(diffs[j])+1].append(log_post+phase_posts[j]+log_count)
                     gtind += 1
     else:
         for i in xrange(nsamples):

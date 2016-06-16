@@ -102,8 +102,12 @@ def RunLocus(locus, args=None):
                                  debug=args.debug)
     # Print intermediate results to stderr so we can track
     outline = locus.GetResultsString()
+    # Print stutter results
+    if locus.eststutter is not None:
+        stutterline = locus.GetStutterString()
+    else: stutterline = None
     sys.stderr.write("PROGRESS: " + outline)
-    return outline
+    return outline, stutterline
 
 def main():
     ############################
@@ -117,7 +121,7 @@ def main():
     parser.add_argument("--asdhet", help="ASD-Het file. Must be indexed bed file. See help for columns.", type=str, required=True) 
     parser.add_argument("--asdhetdir", help="Is asdhet a directory", action="store_true")
     parser.add_argument("--vcf", help="Input is a VCF file (not asdhet)", action="store_true")
-    parser.add_argument("--eststutter", help="Estimate stutter model from reads", action="store_true")
+    parser.add_argument("--eststutter", help="Estimate stutter model from reads", type=str)
     parser.add_argument("--loci", help="Bed file with loci to process. First three columns are chrom, start, end", type=str, required=True)
     parser.add_argument("--out", help="Output file (default stdout)", type=str, required=False)
 
@@ -175,6 +179,7 @@ def main():
     # Get output
     if args.out is None: output = sys.stdout
     else: output = open(args.out, "w")
+    if args.eststutter is not None: stutter = open(args.eststutter, "w")
 
     # Load priors
     if args.joint and args.joint_priors is not None:
@@ -203,9 +208,13 @@ def main():
         jlocus.PrintResults(output)
     else:
         outlines = joblib.Parallel(n_jobs=args.numproc, verbose=50)(joblib.delayed(RunLocus)(locus, args=args) for locus in loci)
-        for l in outlines:
+        for res in outlines:
+            l, s = res
             output.write(l)
             output.flush()
+            if s is not None:
+                stutter.write(s)
+                stutter.flush()
 
 if __name__ == "__main__":
     main()

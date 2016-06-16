@@ -119,6 +119,7 @@ class Locus:
         self.best_res = None
         self.stderr = []
         self.numsamples = 0
+        self.stutter_model = []
         # Priors
         self.prior_logmu = None
         self.prior_beta = None
@@ -166,7 +167,7 @@ class Locus:
             if self.isvcf:
                 reader = vcf.Reader(open(df, "rb"))
                 # Estimate stutter params
-                if self.eststutter:
+                if self.eststutter is not None:
                     success, chrom, start, end, motif_len, read_count_dict, \
                         in_frame_count, out_frame_count, locus = read_str_vcf.get_str_read_counts(reader, uselocus=(self.chrom, self.start, self.end))
                     if not success: return
@@ -182,8 +183,10 @@ class Locus:
                                                                                                            pgeom, \
                                                                                                            down, \
                                                                                                            up, diploid=True)
+                    self.stutter_model = [up, down, pgeom]
                 else:
-                    success, str_gts, min_str, max_str, locus, motif_len = read_str_vcf.get_str_gts_diploid(reader, uselocus=(self.chrom, self.start, self.end))
+                    success, str_gts, min_str, max_str, locus, motif_len = \
+                        read_str_vcf.get_str_gts_diploid(reader, uselocus=(self.chrom, self.start, self.end))
                     if not success: return
                 # Get tmrcas
                 tmrcas = read_str_vcf.get_sample_tmrcas(reader, uselocus=(self.chrom, self.start, self.end))
@@ -242,7 +245,7 @@ class Locus:
             afreqs_shifted = np.roll(afreqs, shift)
             if shift != 0: afreqs_shifted[shift:] = 0
             prob = float(afreqs.transpose().dot(afreqs_shifted))+SMALLNUM
-            if prob > 0:
+            if prob > 0 and asdprobs[a] > 0:
                 logprobs.append(np.log(prob*asdprobs[a]))
         return reduce(lambda x, y: np.logaddexp(x, y), logprobs)
 
@@ -378,8 +381,11 @@ class Locus:
         if self.best_res is None: return
         if self.stderrs_method == "fisher" or self.stderrs_method == "both":
             fisher_info = self.GetFisherInfo(mu_bounds=mu_bounds, beta_bounds=beta_bounds, pgeom_bounds=pgeom_bounds, lencoeff_bounds=lencoeff_bounds)
-            self.stderr.extend(np.sqrt(np.diagonal(inv(fisher_info))))
-#            self.stderr.append(np.sqrt(1/fisher_info))
+            try:
+                self.stderr.extend(np.sqrt(np.diagonal(inv(fisher_info))))
+            except np.linalg.linalg.LinAlgError:
+                MSG("Error inverting fisher info %s"%fisher_info)
+                self.stderr.extend([np.nan for i in range(fisher_info.shape[0])])
         if self.stderrs_method == "jackknife" or self.stderrs_method == "both":
             self.stderr.append(self.GetJackknifeStderr(mu_bounds=mu_bounds, beta_bounds=beta_bounds, pgeom_bounds=pgeom_bounds, lencoeff_bounds=lencoeff_bounds))
         if self.stderrs_method not in ["fisher","jackknife","both"]:
@@ -398,6 +404,8 @@ class Locus:
         if self.best_res is None: return ""
         return "\t".join(map(str, [self.chrom, self.start, self.end]+list(self.best_res.x) + self.stderr + [self.numsamples]))+"\n"
 
+    def GetStutterString(self):
+        return "\t".join(map(str, [self.chrom, self.start, self.end] + self.stutter_model))+"\n"
 
     def __str__(self):
         return "[Locus] %s:%s-%s"%(self.chrom, self.start, self.end)

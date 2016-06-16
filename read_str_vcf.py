@@ -15,6 +15,7 @@ def get_str_read_counts(vcf_reader, uselocus=None):
     # Attempt to read record from VCF
     if uselocus is not None:
         loci = list(vcf_reader.fetch(*uselocus))
+        loci = [locus for locus in loci if locus.POS == uselocus[1]]
         if len(loci) != 1:
             return False, "N/A", -1, -1, -1, {}, -1, -1, None
         record = loci[0]
@@ -69,6 +70,7 @@ def get_sample_tmrcas(vcf_reader, uselocus=None):
     # Attempt to read record from VCF
     if uselocus is not None:
         loci = list(vcf_reader.fetch(*uselocus))
+        loci = [locus for locus in loci if locus.POS == uselocus[1]]
         if len(loci) != 1:
             return {}
         record = loci[0]
@@ -79,14 +81,16 @@ def get_sample_tmrcas(vcf_reader, uselocus=None):
             return {}
     tmrcas = {}
     for sample in record:
-        if hasattr(sample, "TMRCA"): tmrcas[sample.sample] = sample["TMRCA"]
-        else: tmrcas[sample.sample] = 0
+        try:
+            tmrcas[sample.sample] = int(sample["TMRCA"])
+        except: ERROR("No TMRCA field found")
     return tmrcas
 
 def get_str_gts_diploid(vcf_reader, uselocus=None):
     # Attempt to read record from VCF
     if uselocus is not None:
         loci = list(vcf_reader.fetch(*uselocus))
+        loci = [locus for locus in loci if locus.POS == uselocus[1]]
         if len(loci) != 1:
             return False, {}, -1, -1, None
         record = loci[0]
@@ -131,11 +135,12 @@ def get_str_gts_diploid(vcf_reader, uselocus=None):
         gt1, gt2 = map(int, sample["GT"].split("/"))
         samplegt = (len(record.alleles[gt1])-center, len(record.alleles[gt2])-center)
         for i in xrange(len(record.alleles)):
-            for j in xrange(i, len(record.alleles)):
+            for j in xrange(len(record.alleles)):
                 if record.alleles[i] is None or record.alleles[j] is None: continue
                 if len(record.alleles[i])%motif_len != best_frame or len(record.alleles[j])%motif_len != best_frame: continue
-                repeat_diffs = ( (len(record.alleles[i])-center)/motif_len, (len(record.alleles[j])-center))
+                repeat_diffs = ( (len(record.alleles[i])-center)/motif_len, (len(record.alleles[j])-center)/motif_len)
                 post = int(samplegt==repeat_diffs)
+                if post == 0: continue # don't need to record
                 if repeat_diffs in sample_probs:
                     sample_probs[repeat_diffs] += post
                 else: sample_probs[repeat_diffs] = post
