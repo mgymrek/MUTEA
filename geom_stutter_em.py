@@ -34,7 +34,6 @@ def run_EM(sample_read_counts, debug=False, diploid=False):
         eff_coverage += sum(valid_read_counts[i].values())-1
         read_counts.append(count_dict)        
     num_stutters = 1 + 2*min(5, max_stutter) # Number of stutter options considered [-n, -n+1, ..., 0, ..., n-1, n]
-
     # Check that we have sufficient reads to perform the inference
     if eff_coverage < min_eff_cov:
         return COVERAGE_LIMIT, eff_coverage, None, None, None, None
@@ -67,7 +66,7 @@ def run_EM(sample_read_counts, debug=False, diploid=False):
 
         # Reestimate parameters
         log_gt_priors    = recalc_log_pop_priors(log_gt_posteriors)
-        down, up, p_geom = recalc_stutter_params(log_gt_posteriors, read_counts, nalleles, allele_sizes, down, up, p_geom, diploid=diploid)
+        down, up, p_geom = recalc_stutter_params(log_gt_posteriors, read_counts, nalleles, allele_sizes, down, up, p_geom, num_stutters, diploid=diploid)
         if debug:
             MSG("POP PRIORS: %s"%(str(numpy.exp(log_gt_priors))))
 
@@ -143,23 +142,26 @@ def recalc_log_pop_priors(log_gt_posteriors):
     log_counts = logsumexp(log_gt_posteriors, axis=0)
     return log_counts - logsumexp(log_counts)
 
-def GetLogTransitionProb(true_allele, obs_allele, down, up, p_geom):
-    stutter_dist = geom(p_geom)
+def GetLogTransitionProb(true_allele, obs_allele, down, up, stutter_probs):
     log_down, log_eq, log_up = map(numpy.log, [down, 1-down-up, up])
     if obs_allele - true_allele > 0: logdirprob = log_up
     elif obs_allele - true_allele < 0: logdirprob = log_down
     else: return log_eq
-    log_step_prob = stutter_dist.logpmf(abs(obs_allele-true_allele))
+    log_step_prob = stutter_probs[abs(obs_allele-true_allele)-1]
     return logdirprob+log_step_prob
 
-def GetReadPhasePosts(allele1, allele2, read_allele, down, up, pgeom):
+def GetReadPhasePosts(allele1, allele2, read_allele, down, up, stutter_probs):
     log_one_half = numpy.log(0.5)
-    log_phase_one = log_one_half + GetLogTransitionProb(allele1, read_allele, down, up, pgeom)
-    log_phase_two = log_one_half + GetLogTransitionProb(allele2, read_allele, down, up, pgeom)
+    log_phase_one = log_one_half + GetLogTransitionProb(allele1, read_allele, down, up, stutter_probs)
+    log_phase_two = log_one_half + GetLogTransitionProb(allele2, read_allele, down, up, stutter_probs)
     log_phase_total = logsumexp([log_phase_one, log_phase_two])
     return [log_phase_one-log_phase_total, log_phase_two-log_phase_total]
 
-def recalc_stutter_params(log_gt_posteriors, read_counts, nalleles, allele_sizes, down, up, pgeom, diploid=False):
+def recalc_stutter_params(log_gt_posteriors, read_counts, nalleles, allele_sizes, down, up, pgeom, max_stutter, diploid=False):
+    # Pre-calculate stutter probabilities for old model
+    stutter_dist = geom(pgeom)
+    stutter_probs = [stutter_dist.pmf(i) for i in range(1, max_stutter+1)]
+    # Set up counts
     nsamples   = log_gt_posteriors.shape[0]
     log_counts = [[0], [0], [0]]   # Pseudocounts
     log_diffs  = [0, numpy.log(2)] # Step sizes of 1 and 2, so that p_geom < 1 
@@ -174,7 +176,7 @@ def recalc_stutter_params(log_gt_posteriors, read_counts, nalleles, allele_sizes
                         diff1 = allele_sizes[read_index]-allele_sizes[a1]
                         diff2 = allele_sizes[read_index]-allele_sizes[a2]
                         phase_posts = GetReadPhasePosts(allele_sizes[a1], allele_sizes[a2], \
-                                                            allele_sizes[read_index], down, up, pgeom)
+                                                            allele_sizes[read_index], down, up, stutter_probs)
                         diffs = [diff1, diff2]
                         for j in range(len(diffs)):
                             if diffs[j] != 0:
