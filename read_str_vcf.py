@@ -92,13 +92,13 @@ def get_str_gts_diploid(vcf_reader, uselocus=None):
         loci = list(vcf_reader.fetch(*uselocus))
         loci = [locus for locus in loci if locus.POS == uselocus[1]]
         if len(loci) != 1:
-            return False, {}, -1, -1, None
+            return False, {}, -1, -1, None, None
         record = loci[0]
     else:
         try:
             record = vcf_reader.next()
         except StopIteration:
-            return False, {}, -1, -1, None
+            return False, {}, -1, -1, None, None
     
     # Get all lengths
     all_lens = []

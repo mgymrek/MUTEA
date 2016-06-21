@@ -95,11 +95,13 @@ def MSG(msg):
     sys.stderr.write(msg.strip() + "\n")
 
 def RunLocus(locus, args=None):
-    locus.MaximizeLikelihood(mu_bounds=(args.min_mu, args.max_mu), \
-                                 beta_bounds=(args.min_beta, args.max_beta), \
-                                 pgeom_bounds=(args.min_pgeom, args.max_pgeom), \
-                                 lencoeff_bounds=(args.min_lencoeff, args.max_lencoeff), \
-                                 debug=args.debug)
+    if args.only_stutter:
+        locus.LoadData()
+    else: locus.MaximizeLikelihood(mu_bounds=(args.min_mu, args.max_mu), \
+                                       beta_bounds=(args.min_beta, args.max_beta), \
+                                       pgeom_bounds=(args.min_pgeom, args.max_pgeom), \
+                                       lencoeff_bounds=(args.min_lencoeff, args.max_lencoeff), \
+                                       debug=args.debug)
     # Print intermediate results to stderr so we can track
     outline = locus.GetResultsString()
     # Print stutter results
@@ -124,14 +126,15 @@ def main():
     parser.add_argument("--eststutter", help="Estimate stutter model from reads", type=str)
     parser.add_argument("--loci", help="Bed file with loci to process. First three columns are chrom, start, end", type=str, required=True)
     parser.add_argument("--out", help="Output file (default stdout)", type=str, required=False)
+    parser.add_argument("--only-stutter", help="Only estimate stutter noise.", action="store_true")
 
     # Filtering options
     parser.add_argument("--min_samples", help="Don't process if less than this many samples", type=int, default=50)
     parser.add_argument("--max_samples", help="Only process this many samples (for debugging)", type=int, default=1000000)
 
     # Per-locus Estimation options
-    parser.add_argument("--min_mu", required=False, type=float, default=0.0000001, help="Lower optimization boundary for mu.")
-    parser.add_argument("--max_mu", required=False, type=float, default=0.1, help="Upper optimization boundary for mu.")
+    parser.add_argument("--min_mu", required=False, type=float, default=0.00000001, help="Lower optimization boundary for mu.")
+    parser.add_argument("--max_mu", required=False, type=float, default=0.05, help="Upper optimization boundary for mu.")
     parser.add_argument("--min_pgeom", required=False, type=float, default=0.7, help="Lower optimization boundary for pgeom.")
     parser.add_argument("--max_pgeom", required=False, type=float, default=1.0, help="Upper optimization boundary for pgeom.")
     parser.add_argument("--min_beta", required=False, type=float, default=0.0, help="Lower optimization boundary for beta.")
@@ -197,7 +200,7 @@ def main():
     if args.joint:
         jlocus = jointlocus.JointLocus(loci, _ires=args.ires, _numproc=args.numproc)
         jlocus.SetPriors(jpriors)
-        MSG("[main_autosomal.py] Processing joint locus with %s loci..."%(len(jlocus.loci)))
+        MSG("[main_autosomal.py] Processing joint locus with %s loci... (%s max)"%(len(jlocus.loci), args.maxloci))
         jlocus.MaximizeLikelihood(mu_bounds=(args.min_mu, args.max_mu), \
                                       sd_bounds=(args.min_sd, args.max_sd), \
                                       beta_bounds=(args.min_beta, args.max_beta), \
@@ -210,8 +213,9 @@ def main():
         outlines = joblib.Parallel(n_jobs=args.numproc, verbose=50)(joblib.delayed(RunLocus)(locus, args=args) for locus in loci)
         for res in outlines:
             l, s = res
-            output.write(l)
-            output.flush()
+            if not args.only_stutter:
+                output.write(l)
+                output.flush()
             if s is not None:
                 stutter.write(s)
                 stutter.flush()
