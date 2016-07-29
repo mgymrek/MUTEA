@@ -157,7 +157,7 @@ class EstStutterGenotyper:
         self.construct_matrix(down, up, p_geom, min_allele, max_allele)
         return True
 
-    def get_genotype_posteriors(self, read_count_dict, true_genotype=None, stutter_model=None):
+    def get_genotype_posteriors(self, read_count_dict, true_genotype=None, stutter_model=None, errprob=0):
         read_counts_array = numpy.zeros(self.nalleles)
         for length,count in read_count_dict.items():
             if length < self.min_allele or length > self.max_allele:
@@ -171,14 +171,24 @@ class EstStutterGenotyper:
             keys = []
             for a1 in xrange(self.nalleles):
                 for a2 in xrange(self.nalleles):
+                    if a1 == a2: LLs[gtind] = numpy.log(1)
+                    else: LLs[gtind] = numpy.log(0.5)
                     step_probs1 = self.step_probs[a1,:]
                     step_probs2 = self.step_probs[a2,:]
-                    step_probs = numpy.logaddexp(step_probs1, step_probs2)+numpy.log(0.5)
-                    LLs[gtind] = numpy.sum(read_counts_array*step_probs)
+                    step_probs = numpy.logaddexp(step_probs1, step_probs2)+numpy.log(0.5)+numpy.log(1-errprob)
+                    step_probs = numpy.logaddexp(numpy.log(errprob), step_probs)
+                    LLs[gtind] += numpy.sum(read_counts_array*step_probs)
                     keys.append((allele_sizes[a1], allele_sizes[a2]))
                     gtind += 1
             posteriors = numpy.exp(LLs-logsumexp(LLs))
-            return dict(zip(keys, posteriors))
+            # Combine (a, b) and (b, a)
+            posts = dict(zip(keys, posteriors))
+            posts_new = {}
+            for key in posts:
+                a, b = key
+                if a < b: posts_new[(a, b)] = posts_new.get((a, b), 0) + posts[key]
+                else: posts_new[(b, a)] = posts_new.get((b, a), 0) + posts[key]
+            return posts_new
         else:
             LLs        = numpy.sum(self.step_probs*read_counts_array, axis=1)
             posteriors = numpy.exp(LLs-logsumexp(LLs))

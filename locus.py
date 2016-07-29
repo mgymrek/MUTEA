@@ -11,7 +11,7 @@ import scipy.stats
 import sys
 import vcf
 from numpy.linalg import inv
-
+import operator
 import genotypers
 from mutation_model import OUGeomSTRMutationModel
 import matrix_optimizer
@@ -32,15 +32,16 @@ def MSG(msg):
 
 def determine_allele_range_from_seed(max_tmrca, mu, beta, p_geom,
                                      min_obs_allele, max_obs_allele,
-                                     seed, max_possible_range=200,
-                                     max_leakage=1e-5, debug=False):
-    if debug:
-        MSG("Determining allele range for MAX_TMRCA=%d, mu=%f, beta=%f, p=%f"%(max_tmrca, mu, beta, p_geom))
-        MSG("Min obs=%s, Max obs=%s"%(min_obs_allele, max_obs_allele))
+                                     seed, max_possible_range=100,
+                                     max_leakage=1e-5, debug=False, joint=False):
+#    if debug:
+#        MSG("Determining allele range for MAX_TMRCA=%d, mu=%f, beta=%f, p=%f"%(max_tmrca, mu, beta, p_geom))
+#        MSG("Min obs=%s, Max obs=%s"%(min_obs_allele, max_obs_allele))
     min_possible_range = max(-min_obs_allele, max_obs_allele)
 
     # Make sure allele range is large enough by checking for leakage, starting from seed
     allele_range = max(seed, min_possible_range)
+    iteration = 0
     while allele_range < max_possible_range:
         mut_model = OUGeomSTRMutationModel(p_geom, mu, beta, allele_range)
         leakages  = []
@@ -53,8 +54,9 @@ def determine_allele_range_from_seed(max_tmrca, mu, beta, p_geom,
         if leakages[0] < max_leakage and leakages[1] < max_leakage:
             break
         allele_range += 1
-    if allele_range == max_possible_range:
-        MSG("Unable to find an allele range with leakage < the provided bounds and < the specified maximum")
+        iteration += 1
+    if allele_range >= max_possible_range:
+        MSG("Unable to find an allele range with leakage < the provided bounds and < the specified maximum. %s %s"%(allele_range, max_possible_range))
         return None
 
     # Attempt to reduce allele range, in case seed was larger than needed
@@ -80,13 +82,13 @@ def GenerateOptimizer(mut_model, tmrcas):
     optimizer.precompute_results()
     return optimizer
 
-def GenerateMutationModel(locilist, mu, beta, pgeom, len_coeff=0, a0=0):
+def GenerateMutationModel(locilist, mu, beta, pgeom, len_coeff=0, a0=0, debug=False, joint=False):
     max_tmrca = max(map(lambda x: x.GetMaxTMRCA(), locilist))
     min_str = min(map(lambda x: x.GetMinSTR(), locilist))
     max_str = max(map(lambda x: x.GetMaxSTR(), locilist))
     prev_allele_range = max(map(lambda x: x.prev_allele_range, locilist))
     allele_range = determine_allele_range_from_seed(max_tmrca, 10**mu, beta, pgeom, \
-                                                        min_str, max_str, prev_allele_range)
+                                                        min_str, max_str, prev_allele_range, debug=debug, joint=joint)
     if allele_range is None: return None, None
     prev_allele_range = allele_range
     for l in locilist: l.prev_allele_range = allele_range
@@ -108,6 +110,7 @@ class Locus:
         self.eststutter = _eststutter
         self.debug = _debug
         self.data = []
+        self.data_debug = []
         self.maxt = 0
         self.minstr = np.inf
         self.maxstr = -1*np.inf
@@ -119,14 +122,23 @@ class Locus:
         self.best_res = None
         self.stderr = []
         self.numsamples = 0
-        self.stutter_model = []
+        self.stutter_model = None
+        # Pairs
+        self.use_sample_pairs = False
+        self.pair_file = None
         # Priors
         self.prior_logmu = None
         self.prior_beta = None
         self.prior_pgeom = None
         # Features
         self.features = []
+        # Other params
+        self.maxoutframe = 100 # No threshold for now
         
+    def LoadStutter(self, up, down, p):
+        self.stutter_model = [up, down, p]
+        self.eststutter = True
+
     def LoadFeatures(self, _features):
         self.features = _features
 
@@ -161,42 +173,119 @@ class Locus:
     def GetMaxSTR(self):
         return self.maxstr
 
+    def LoadTMRCAPairs(self):
+        tmrcas = {}
+        with open(self.pair_file, "r") as f:
+            for line in f:
+                sample1, sample2, tmrca = line.strip().split()
+                tmrca = int(float(tmrca))
+                tmrcas[(sample1, sample2)] = tmrca
+        return tmrcas
+
     def LoadData(self):
         self.data = []
         for df in self.datafiles:
             if self.isvcf:
                 reader = vcf.Reader(open(df, "rb"))
-                # Estimate stutter params
+                # Check that locus is there
+                try:
+                    x = reader.fetch(self.chrom, self.start, self.end)
+                except ValueError: continue
+                # Adjust for stutter
                 if self.eststutter is not None:
+                    # Load genotypes
                     success, chrom, start, end, motif_len, read_count_dict, \
-                        in_frame_count, out_frame_count, locus = read_str_vcf.get_str_read_counts(reader, uselocus=(self.chrom, self.start, self.end))
+                        in_frame_count, out_frame_count, locus = \
+                        read_str_vcf.get_str_read_counts(reader, uselocus=(self.chrom, self.start, self.end))
                     if not success: return
-                    genotyper = genotypers.EstStutterGenotyper(_diploid=True)
+                    # Skip loci with large fractions of samples with out-of-frame reads
+                    if 100.0*out_frame_count/(in_frame_count+out_frame_count) > self.maxoutframe:
+                        continue
+                    if len(read_count_dict.values()) == 0: return
+                    if self.use_sample_pairs:
+                        diploid = False
+                    else: diploid = True
+                    # Get allele range
                     obs_sizes = sorted(list(set(reduce(lambda x,y: x+y, map(lambda x: x.keys(), read_count_dict.values())))))
                     min_allele = obs_sizes[0]
                     max_allele = obs_sizes[-1]
-                    genotyper.train(read_count_dict, min_allele, max_allele, debug=self.debug)
-                    pgeom = genotyper.est_pgeom
-                    down = genotyper.est_down
-                    up = genotyper.est_up
-                    str_gts, min_str, max_str = read_str_vcf.counts_to_centalized_posteriors(read_count_dict, \
-                                                                                                           pgeom, \
-                                                                                                           down, \
-                                                                                                           up, diploid=True)
-                    self.stutter_model = [up, down, pgeom]
+                    # Get stutter params
+                    if self.stutter_model is not None:
+                        up, down, pgeom = self.stutter_model
+                        if self.debug: MSG("Using stutter params %s, %s, %s"%(up, down, pgeom))
+                    else:
+                        genotyper = genotypers.EstStutterGenotyper(_diploid=diploid)
+                        em_success = genotyper.train(read_count_dict, min_allele, max_allele, debug=self.debug)
+                        if not em_success: return
+                        pgeom = genotyper.est_pgeom
+                        down = genotyper.est_down
+                        up = genotyper.est_up
+                        self.stutter_model = [up, down, pgeom]
+                    # Get gts
+                    str_gts, min_str, max_str, center = read_str_vcf.counts_to_centalized_posteriors(read_count_dict, \
+                                                                                                         pgeom, \
+                                                                                                         down, \
+                                                                                                         up, diploid=diploid)
+                    if len(str_gts.keys()) < self.minsamples: return
+                    ##########
+                    # Filter things whose ML genotype doesn't match lobSTR call
+                    # These are usually from alignment errors filtered using --min-het-freq
+                    # TODO working on this
+                    """
+                    success, str_gts_lob, min_str, max_str, locus, motif_len = \
+                        read_str_vcf.get_str_gts_diploid(reader, uselocus=(self.chrom, self.start, self.end))
+                    if not success: return
+                    rmsamples = set()
+                    for sample in str_gts:
+                        max_gt_st = max(str_gts[sample].iteritems(), key=operator.itemgetter(1))[0]
+                        for gt in max_gt_st:
+                            rc = read_count_dict[sample][gt+center]
+                            if rc <= 1:
+                                MSG("Removing sample %s allele %s, max_gt_st=%s, reads=%s"%(sample, gt, max_gt_st, read_count_dict[sample]))
+                                rmsamples.add(sample)
+                            else:
+                                MSG("Keeping sample %s allele %s, max_gt_st=%s, reads=%s"%(sample, gt, max_gt_st, read_count_dict[sample]))
+#                        max_gt_lob = max(str_gts_lob[sample].iteritems(), key=operator.itemgetter(1))[0]
+#                        if max_gt_st != max_gt_lob:
+#                            MSG("Removing sample %s, max_gt_st=%s, max_gt_lob=%s, reads=%s"%(sample, max_gt_st, max_gt_lob, read_count_dict[sample]))
+#                            rmsamples.append(sample)
+                    for sample in rmsamples: del str_gts[sample]
+                    if len(str_gts.keys()) < self.minsamples: return
+                    """
+                    ##########
                 else:
                     success, str_gts, min_str, max_str, locus, motif_len = \
                         read_str_vcf.get_str_gts_diploid(reader, uselocus=(self.chrom, self.start, self.end))
                     if not success: return
-                # Get tmrcas
-                tmrcas = read_str_vcf.get_sample_tmrcas(reader, uselocus=(self.chrom, self.start, self.end))
-                # Get data in format for downstream
+                # Get tmrcas and put data in format for downstream
+                if self.use_sample_pairs:
+                    tmrcas = self.LoadTMRCAPairs()
+                    for sample in tmrcas:
+                        if sample[0] in str_gts and sample[1] in str_gts:
+                            self.data.append((tmrcas[sample], (str_gts[sample[0]], str_gts[sample[1]])))
+                else:
+                    tmrcas = read_str_vcf.get_sample_tmrcas(reader, uselocus=(self.chrom, self.start, self.end))
+                    for sample in str_gts:
+                        if len(str_gts[sample].keys()) > 0:
+                            self.data.append((tmrcas[sample], str_gts[sample]))
+                        else:
+                            MSG("Skipping sample %s"%sample)
+                #### DEBUG TODO REMOVE ####
+#                print "lendata", len(self.data), motif_len, min_str, max_str, max(tmrcas.values())
+#                success, str_gts2, min_str, max_str, locus, motif_len = \
+#                    read_str_vcf.get_str_gts_diploid(reader, uselocus=(self.chrom, self.start, self.end))
+#                for sample in str_gts:
+#                    max_gt1 = max(str_gts[sample].iteritems(), key=operator.itemgetter(1))[0]
+#                    max_gt2 = max(str_gts2[sample].iteritems(), key=operator.itemgetter(1))[0]
+#                    if max_gt1 != max_gt2:
+#                    print sample, read_count_dict[sample], map(lambda x: x-2, max_gt1), map(lambda x: x-2, max_gt2), str_gts2[sample][max_gt2], str_gts[sample][max_gt1]
+#                sys.exit(1)
+                ###########################
+                # Set metadata
                 self.minstr = min_str
                 self.maxstr = max_str
                 self.maxt = max(tmrcas.values())
                 self.period = motif_len
-                for sample in str_gts:
-                    self.data.append((tmrcas[sample], str_gts[sample]))
             else:
                 x = tabix.open(df)
                 try:
@@ -212,7 +301,9 @@ class Locus:
                     if a1 > self.maxstr: self.maxstr = a1
                     if a2 > self.maxstr: self.maxstr = a2
                     self.period = period
-        if len(self.data) > self.maxsamples: self.data = self.data[:self.maxsamples]
+        if len(self.data) > self.maxsamples:
+            random.shuffle(self.data)
+            self.data = self.data[:self.maxsamples]
         self.numsamples = len(self.data)
 
     def callback_function(self, val):
@@ -220,10 +311,16 @@ class Locus:
 
     def GetASDProbs(self, gtpost):
         asdprobs = {}
-        for k in gtpost:
-            g1, g2 = k
-            asd = (g2-g1)**2
-            asdprobs[asd] = asdprobs.get(asd, 0) + gtpost[k]
+        if self.use_sample_pairs:
+            for g1 in gtpost[0]:
+                for g2 in gtpost[1]:
+                    asd = (g2-g1)**2
+                    asdprobs[asd] = asdprobs.get(asd, 0) + gtpost[0][g1]*gtpost[1][g2]
+        else:
+            for k in gtpost:
+                g1, g2 = k
+                asd = (g2-g1)**2
+                asdprobs[asd] = asdprobs.get(asd, 0) + gtpost[k]
         return asdprobs
 
     def DetermineSampleASDLogLikelihood(self, sample_index, allele_range, mut_model, optimizer, \
@@ -259,7 +356,7 @@ class Locus:
     def NegativeLogLikelihood(self, mu, beta, pgeom, lencoeff, keep, \
                                   mu_bounds=None, beta_bounds=None, pgeom_bounds=None, lencoeff_bounds=None, \
                                   mut_model=None, allele_range=None, optimizer=None, debug=False, \
-                                  mean_length=0):
+                                  mean_length=0, joint=False):
         # Check boundaries
         if mu_bounds is not None:
             if mu < math.log10(mu_bounds[0]) or mu > math.log10(mu_bounds[1]): return np.inf
@@ -273,7 +370,7 @@ class Locus:
         # Create mutation model
         if mut_model is None:
             ref_length = self.end-self.start+1
-            mut_model, allele_range = GenerateMutationModel([self], mu, beta, pgeom, len_coeff=lencoeff, a0=(mean_length-ref_length))
+            mut_model, allele_range = GenerateMutationModel([self], mu, beta, pgeom, len_coeff=lencoeff, a0=(mean_length-ref_length), debug=debug, joint=joint)
             if mut_model is None: return np.inf
 
         # Create optimizer
@@ -291,7 +388,6 @@ class Locus:
             if len(self.data) < self.minsamples: return
             keep = range(len(self.data))
         else: keep = jkind
-
         # Likelihood function
         if lencoeff_bounds[0] == lencoeff_bounds[1]:
             fn = (lambda x: self.NegativeLogLikelihood(x[0], x[1], x[2], lencoeff_bounds[1], keep, \
@@ -405,7 +501,9 @@ class Locus:
         return "\t".join(map(str, [self.chrom, self.start, self.end]+list(self.best_res.x) + self.stderr + [self.numsamples]))+"\n"
 
     def GetStutterString(self):
-        return "\t".join(map(str, [self.chrom, self.start, self.end] + self.stutter_model))+"\n"
+        if self.stutter_model is not None:
+            return "\t".join(map(str, [self.chrom, self.start, self.end] + self.stutter_model))+"\n"
+        else: return "\t".join(map(str, [self.chrom, self.start, self.end] + ["NA","NA","NA"]))+"\n"
 
     def __str__(self):
         return "[Locus] %s:%s-%s"%(self.chrom, self.start, self.end)

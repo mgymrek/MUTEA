@@ -49,7 +49,7 @@ def LoadLocusFeatures(locusfeatures, use_features=None):
     sys.stdout.write("# Feature means: %s\n"%",".join(map(str, feature_means)))
     return features
 
-def LoadPriors(locuspriors):
+def LoadPriors(locuspriors, use_locus_means):
     if locuspriors is None: return None
     priors = {}
     with open(locuspriors, "r") as f:
@@ -61,13 +61,35 @@ def LoadPriors(locuspriors):
             beta = float(beta)
             pgeom = float(pgeom)
             priors[(chrom, start, end)] = (logmu, beta, pgeom)
+    if use_locus_means:
+        mean_beta = np.mean([value[1] for value in priors.values()])
+        mean_p = np.mean([value[2] for value in priors.values()])
+        for locus in priors: priors[locus] = (priors[locus][0], mean_beta, mean_p)
     return priors
+
+def LoadStutter(sfile):
+    if sfile is None: return None
+    st = {}
+    with open(sfile, "r") as f:
+        for line in f:
+            if len(line.strip().split()) != 6: continue
+            chrom, start, end, up, down, pgeom  = line.strip().split()
+            start = int(start)
+            end = int(end)
+            up = float(up)
+            down = float(down)
+            pgeom = float(pgeom)
+            st[(chrom, start, end)] = (up, down, pgeom)
+    return st
 
 def LoadLoci(locfile, datafiles, minsamples, maxsamples, \
                  locuspriors, locusfeatures, use_features, \
-                 stderrs, jackknife_blocksize, isvcf, eststutter, debug=False):
-    priors = LoadPriors(locuspriors)
+                 stderrs, jackknife_blocksize, isvcf, eststutter, usestutter, \
+                 use_sample_pairs, use_locus_means, \
+                 debug=False):
+    priors = LoadPriors(locuspriors, use_locus_means)
     features = LoadLocusFeatures(locusfeatures, use_features=use_features)
+    stutter = LoadStutter(usestutter)
     loci = []
     with open(locfile, "r") as f:
         for line in f:
@@ -75,15 +97,22 @@ def LoadLoci(locfile, datafiles, minsamples, maxsamples, \
             chrom = str(chrom)
             start = int(start)
             end = int(end)
-            loc = locus.Locus(chrom, start, end, datafiles, minsamples, maxsamples, stderrs, isvcf, eststutter, _debug=debug)
+            loc = locus.Locus(chrom, start, end, datafiles, minsamples, maxsamples, \
+                                  stderrs, isvcf, eststutter, _debug=debug)
             loc.jkblocksize = jackknife_blocksize
             key = (chrom, start, end)
             if priors is not None and key not in priors: continue
             if features is not None and key not in features: continue
+            if stutter is not None and key not in stutter: continue
             if priors is not None and key in priors:
                 loc.LoadPriors(*priors[key])
             if features is not None and key in features:
                 loc.LoadFeatures(features[key])
+            if use_sample_pairs is not None:
+                loc.use_sample_pairs = True
+                loc.pair_file = use_sample_pairs
+            if stutter is not None and key in stutter:
+                loc.LoadStutter(*stutter[key])
             loci.append(loc)
     return loci
 
@@ -97,11 +126,12 @@ def MSG(msg):
 def RunLocus(locus, args=None):
     if args.only_stutter:
         locus.LoadData()
-    else: locus.MaximizeLikelihood(mu_bounds=(args.min_mu, args.max_mu), \
-                                       beta_bounds=(args.min_beta, args.max_beta), \
-                                       pgeom_bounds=(args.min_pgeom, args.max_pgeom), \
-                                       lencoeff_bounds=(args.min_lencoeff, args.max_lencoeff), \
-                                       debug=args.debug)
+    else:
+        locus.MaximizeLikelihood(mu_bounds=(args.min_mu, args.max_mu), \
+                                     beta_bounds=(args.min_beta, args.max_beta), \
+                                     pgeom_bounds=(args.min_pgeom, args.max_pgeom), \
+                                     lencoeff_bounds=(args.min_lencoeff, args.max_lencoeff), \
+                                     debug=args.debug)
     # Print intermediate results to stderr so we can track
     outline = locus.GetResultsString()
     # Print stutter results
@@ -123,9 +153,13 @@ def main():
     parser.add_argument("--asdhet", help="ASD-Het file. Must be indexed bed file. See help for columns.", type=str, required=True) 
     parser.add_argument("--asdhetdir", help="Is asdhet a directory", action="store_true")
     parser.add_argument("--vcf", help="Input is a VCF file (not asdhet)", action="store_true")
-    parser.add_argument("--eststutter", help="Estimate stutter model from reads", type=str)
     parser.add_argument("--loci", help="Bed file with loci to process. First three columns are chrom, start, end", type=str, required=True)
     parser.add_argument("--out", help="Output file (default stdout)", type=str, required=False)
+    parser.add_argument("--use-sample-pairs", help="Run estimtes on pairs of haploids (e.g. Y-STRs). Input sample1,sample2,tmrca", type=str, required=False)
+
+    # Stutter estimation options
+    parser.add_argument("--eststutter", help="Estimate stutter model from reads", type=str)
+    parser.add_argument("--usestutter", help="Use previously estimated stutter model", type=str)
     parser.add_argument("--only-stutter", help="Only estimate stutter noise.", action="store_true")
 
     # Filtering options
@@ -150,6 +184,7 @@ def main():
     parser.add_argument("--locus_features", help="Tab file of chrom, start, end, feature1, feature2, ...", type=str)
     parser.add_argument("--joint_priors", help="File with priors. One line per parameter.", type=str)
     parser.add_argument("--use_features", help="List of feature numbers to use. (default all)", type=str)
+    parser.add_argument("--use_locus_means", help="Use mean of per-locus beta and p, rather than individual locus estimates", action="store_true")
 
     # Joint estimation options - for drawing mu from distribution TODO
     parser.add_argument("--drawmu", help="Model mu as drawn from a distribution", action="store_true")
@@ -170,13 +205,18 @@ def main():
     # Get list of asdhet files
     asdhet = []
     if args.asdhetdir:
-        asdhet = glob.glob(args.asdhet + "/*.bed.gz")
+        if args.vcf:
+            asdhet = glob.glob(args.asdhet + "/*.vcf.gz")
+        else: asdhet = glob.glob(args.asdhet + "/*.bed.gz")
     else: asdhet = [args.asdhet]
 
     # Load loci to process
     loci = LoadLoci(args.loci, asdhet, args.min_samples, args.max_samples, \
                         args.locus_priors, args.locus_features, args.use_features, \
-                        args.stderrs, args.jackknife_blocksize, args.vcf, args.eststutter, debug=args.debug)
+                        args.stderrs, args.jackknife_blocksize, args.vcf, args.eststutter, \
+                        args.usestutter, \
+                        args.use_sample_pairs, args.use_locus_means, \
+                        debug=args.debug)
     if len(loci) > args.maxloci: loci = loci[:args.maxloci]
 
     # Get output
@@ -216,7 +256,7 @@ def main():
             if not args.only_stutter:
                 output.write(l)
                 output.flush()
-            if s is not None:
+            if s is not None and args.eststutter is not None:
                 stutter.write(s)
                 stutter.flush()
 

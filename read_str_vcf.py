@@ -5,6 +5,8 @@ import operator
 import sys
 import vcf
 
+ERRPROB = 0.01 # Probability a read is an error (rather than stutter)
+
 def ERROR(msg):
     sys.stderr.write(msg.strip() + "\n")
     sys.exit(1)
@@ -133,7 +135,7 @@ def get_str_gts_diploid(vcf_reader, uselocus=None):
         sample_probs = {}
         if sample["GT"] is None: continue
         gt1, gt2 = map(int, sample["GT"].split("/"))
-        samplegt = (len(record.alleles[gt1])-center, len(record.alleles[gt2])-center)
+        samplegt = ( (len(record.alleles[gt1])-center)/motif_len, (len(record.alleles[gt2])-center)/motif_len )
         for i in xrange(len(record.alleles)):
             for j in xrange(len(record.alleles)):
                 if record.alleles[i] is None or record.alleles[j] is None: continue
@@ -244,7 +246,7 @@ def counts_to_centalized_posteriors(sample_read_counts, p_geom, down, up, diploi
     # Compute genotype posteriors using genotyper
     gt_posteriors = {}
     for sample,counts in sample_read_counts.items():
-        gt_posteriors[sample] = genotyper.get_genotype_posteriors(counts)
+        gt_posteriors[sample] = genotyper.get_genotype_posteriors(counts, errprob=ERRPROB)
 
     # Compute 'central' allele using the allele with the median posterior sum
     gt_counts = collections.defaultdict(int)
@@ -267,4 +269,6 @@ def counts_to_centalized_posteriors(sample_read_counts, p_geom, down, up, diploi
                 new_posteriors[(gt[0]-center, gt[1]-center)] = prob
             else: new_posteriors[gt-center] = prob
         norm_gt_posteriors[sample] = new_posteriors
-    return norm_gt_posteriors,min_allele-center,max_allele-center
+    if diploid:
+        return norm_gt_posteriors,min_allele-center,max_allele-center,center
+    else: return norm_gt_posteriors,min_allele-center,max_allele-center

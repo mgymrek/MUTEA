@@ -7,6 +7,7 @@ import numpy as np
 import random
 import scipy.integrate
 import sys
+import time
 from numpy.linalg import inv
 
 def ERROR(msg):
@@ -29,13 +30,13 @@ def GetLocusNegLL(locus, drawmu, params, feature_param_index, numfeatures, mu, s
     # Approximate integration of P(D|mu)P(u)du
     nll_values = [GetLocusNegLogLikelihood(locus, mval, lencoeff, mean_length, mu_bounds, \
                                                beta_bounds, pgeom_bounds, lencoeff_bounds, debug=debug) for mval in musamples]
-    if -1*np.inf in nll_values: return -1*np.inf
+    if np.inf in nll_values:
+        raise LLException("Negative infinite neg ll")
     nll = GetProbAvg(nll_values)
     return nll
 
 def GetLocusNegLogLikelihood(locus, mu, lencoeff, mean_length, mu_bounds, \
                                  beta_bounds, pgeom_bounds, lencoeff_bounds, debug=False):
-    if debug: MSG("Get locus neg log likelihood, mu=%s, mean_length=%s"%(mu, mean_length))
     beta = np.random.uniform(*beta_bounds)
     pgeom = np.random.uniform(*pgeom_bounds)
     if locus.prior_beta is not None: beta = locus.prior_beta
@@ -43,20 +44,22 @@ def GetLocusNegLogLikelihood(locus, mu, lencoeff, mean_length, mu_bounds, \
     val = locus.NegativeLogLikelihood(mu, beta, pgeom, lencoeff, range(len(locus.data)), \
                                           mu_bounds=mu_bounds, beta_bounds=beta_bounds, pgeom_bounds=pgeom_bounds, \
                                           lencoeff_bounds=lencoeff_bounds, \
-                                          mut_model=None, allele_range=None, optimizer=None, debug=debug, mean_length=mean_length)
+                                          mut_model=None, allele_range=None, optimizer=None, mean_length=mean_length, joint=True)
     return val
 
 def GetProbAvg(nll_values):
-    # TODO precision?
     logsump = reduce(lambda x, y: np.logaddexp(x, y), map(lambda x: -1*x, nll_values))
     return -1*(logsump - np.log(len(nll_values)))
-#    return -1*np.log(np.mean([np.exp(-1*val) for val in nll_values]))
+
+class LLException(Exception):
+    def __init__(self,*args,**kwargs):
+        Exception.__init__(self,*args,**kwargs)
 
 class JointLocus:
     def __init__(self, _locilist, _ires=10, _numproc=1):
         self.loci = _locilist
         self.best_res = None
-        self.numiter = 3
+        self.numiter = 2
         self.method = "Nelder-Mead"
         self.max_cycle_per_iter = 250
         self.ires = _ires
@@ -97,13 +100,23 @@ class JointLocus:
         if drawmu:
             if sd < sd_bounds[0] or sd > sd_bounds[1]: return np.inf
         # Loop over each locus
-        locnlogliks = joblib.Parallel(n_jobs=self.numproc)(joblib.delayed(GetLocusNegLL)(self.loci[i], drawmu, params, \
-                                                                                             feature_param_index, numfeatures, mu, sd, lencoeff, \
-                                                                                             mu_bounds, beta_bounds, pgeom_bounds, lencoeff_bounds, \
-                                                                                             mean_length=self.mean_length, ires=self.ires, debug=debug) \
-                                                               for i in range(len(self.loci)))
-        if debug: MSG("Params: %s, value %s"%(params, sum(locnlogliks)))
-        return sum(locnlogliks)
+        if debug: MSG("Starting likelihood calculation... %s loci"%len(self.loci))
+        start_time = time.time()
+        try:
+            locnlogliks = joblib.Parallel(n_jobs=self.numproc)(joblib.delayed(GetLocusNegLL)(self.loci[i], drawmu, params, \
+                                                                                                 feature_param_index, numfeatures, mu, sd, lencoeff, \
+                                                                                                 mu_bounds, beta_bounds, pgeom_bounds, lencoeff_bounds, \
+                                                                                                 mean_length=self.mean_length, ires=self.ires, debug=debug) \
+                                                                   for i in range(len(self.loci)))
+            result = sum(locnlogliks)
+        except LLException:
+            if debug: MSG("Exception in likelihood calculation, returning np.inf")
+            result = np.inf
+#        except:
+#            ERROR("Unexpected exception in NegativeLogLikelihood")
+        end_time = time.time()
+        if debug: MSG("Done with likelihood calculation... %s Params: %s, value %s"%((end_time-start_time), params, result))
+        return result
 
     def LoadData(self):
         toremove = []
@@ -135,6 +148,7 @@ class JointLocus:
         best_res = None
         if self.priors is None:
             for i in xrange(self.numiter):
+                if debug: MSG("########### Likelihood iteration %s ########"%(i))
                 while True:
                     x0 = [random.uniform(np.log10(mu_bounds[0]), np.log10(mu_bounds[1]))]
                     if lencoeff_bounds[0] != lencoeff_bounds[1]:

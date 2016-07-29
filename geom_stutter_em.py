@@ -12,6 +12,8 @@ COVERAGE_LIMIT  = 1
 ITERATION_LIMIT = 2
 log_one_half = numpy.log(0.5)
 
+DEBUG_HAPLOID = False
+
 def ERROR(msg):
     sys.stderr.write(msg.strip() + "\n")
     sys.exit(1)
@@ -98,7 +100,11 @@ def init_log_gt_priors(read_counts, nalleles, diploid=False):
             gtind = 0
             for a1 in xrange(nalleles):
                 for a2 in xrange(nalleles):
-                    gt_counts[gtind] += 1.0*counts.get(a1, 0)*counts.get(a2, 0)/num_reads**2 # freq_a1*freq_a2
+                    if a1 != a2 and DEBUG_HAPLOID: continue
+#                    gt_counts[gtind] += 1.0*counts.get(a1, 0)*counts.get(a2, 0)/num_reads**2 # freq_a1*freq_a2
+#                    if a1 == a2: gt_counts[gtind] = gt_counts[gtind]*2 # account for phase
+                    if a1 == a2: gt_counts[gtind] = 1
+                    else: gt_counts[gtind] = 0.5
                     gtind += 1
         else:
             for allele_index,count in counts.items():
@@ -152,6 +158,7 @@ def recalc_stutter_params(log_gt_posteriors, read_counts, nalleles, allele_sizes
             for a1 in xrange(nalleles):
                 for a2 in xrange(nalleles):
                     log_post = log_gt_posteriors[i][gtind]
+#                    print i, down, up, pgeom, (allele_sizes[a1], allele_sizes[a2]), numpy.exp(log_post), dict([(allele_sizes[r], read_counts[i][r]) for r in read_counts[i]])
                     for read_index, count in read_counts[i].items():
                         log_count = numpy.log(count)
                         diff1 = allele_sizes[read_index]-allele_sizes[a1]
@@ -159,6 +166,7 @@ def recalc_stutter_params(log_gt_posteriors, read_counts, nalleles, allele_sizes
                         phase_posts = GetReadPhasePosts(allele_sizes[a1], allele_sizes[a2], \
                                                             allele_sizes[read_index], down, up, stutter_probs)
                         diffs = [diff1, diff2]
+#                        print allele_sizes[read_index], allele_sizes[a1], allele_sizes[a2], diffs, numpy.exp(phase_posts), numpy.exp(log_post)
                         for j in range(len(diffs)):
                             if diffs[j] != 0:
                                 log_diffs.append(log_count+log_post+phase_posts[j]+numpy.log(abs(diffs[j])))
@@ -189,14 +197,19 @@ def recalc_log_gt_posteriors(log_gt_priors, down, up, p_geom, read_counts_array,
         gtind = 0
         for a1 in xrange(nalleles):
             for a2 in xrange(nalleles):
+                if a1 != a2 and DEBUG_HAPLOID:
+                    LLs[:,gtind] = numpy.log(0)
+                    gtind += 1
+                    continue
                 step_probs1 = numpy.hstack(([log_down + stutter_dist.logpmf(abs(allele_sizes[x]-allele_sizes[a1])) for x in range(0, a1)],
                                             [log_eq],
                                             [log_up   + stutter_dist.logpmf(abs(allele_sizes[x]-allele_sizes[a1])) for x in range(a1+1, nalleles)]))
                 step_probs2 = numpy.hstack(([log_down + stutter_dist.logpmf(abs(allele_sizes[x]-allele_sizes[a2])) for x in range(0, a2)],
                                             [log_eq],
                                             [log_up   + stutter_dist.logpmf(abs(allele_sizes[x]-allele_sizes[a2])) for x in range(a2+1, nalleles)]))
-                step_probs = numpy.logaddexp(step_probs1, step_probs2)+log_one_half # assume each read equal probability to come from each allele
-                LLs[:,gtind] = numpy.sum(read_counts_array*step_probs, axis=1)
+                step_probs = numpy.logaddexp(step_probs1+log_one_half, step_probs2+log_one_half)
+                LLs[:,gtind] += numpy.sum(read_counts_array*step_probs, axis=1)
+#                if a1 == a2: LLs[:,gtind]+= numpy.log(2) # account for phase
                 gtind += 1
     else:
         LLs      = numpy.zeros((nsamples, nalleles)) + log_gt_priors
