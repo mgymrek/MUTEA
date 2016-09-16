@@ -67,7 +67,7 @@ def SampleCICoverage(data, ff):
     Sample point from interval of each locus
     What fraction of those overlap our 95% CI?
     """
-    numsamples = 1
+    numsamples = 10
     overlap = []
     for j in range(numsamples):
         success = []
@@ -78,34 +78,75 @@ def SampleCICoverage(data, ff):
         overlap.append(np.mean(success))
     return np.mean(overlap)
 
+def LocusNPCoverage(logmu_est, logmu_est_stderr, num_meoises, num_mutations, ff):
+    """
+    1. Using logmu_est, logmu_est_stderr, get 95% CI for num_mutations by sampling
+    2. Ask if num_mutations in this interval
+    """
+    # Get fudge data
+    stderr = logmu_est_stderr*ff*abs(logmu_est)
+    # Get distribution of num_mutations
+    numsamples = 1000
+    xdist = []
+    for i in range(numsamples):
+        musample = 0
+        while musample >= 0:
+            musample = np.random.normal(loc=logmu_est, scale=stderr)
+        xsample = np.random.binomial(n=num_meoises, p=10**musample)
+        xdist.append(xsample)
+    # Get 5th and 95th percentile of xdist
+    lowbound = np.percentile(xdist, 2.5)
+    highbound = np.percentile(xdist, 97.5)
+    # Ask if obs in interval
+    return int(num_mutations>=lowbound and num_mutations<=highbound)
+
+def GetNPCoverage(data, ff):
+    success = []
+    for i in range(data.shape[0]):
+        success.append(LocusNPCoverage(data.logmu_est.values[i], data.logmu_est_stderr.values[i], \
+                                           data.n.values[i], data.x.values[i], ff))
+    return np.mean(success)
+
 def main():
     parser = argparse.ArgumentParser(__doc__)
     parser.add_argument("--ests", help="Output from main_autosomal with estimates", type=str, required=True)
-    parser.add_argument("--truth", help="File with chrom, start, end, point_estimate, lower_bound, upper_bound (not log)", type=str, required=True)
+    parser.add_argument("--truth", help="File with chrom, start, end, point_estimate, lower_bound, upper_bound (not log)", type=str, required=False)
+    parser.add_argument("--truthnp", help="File with chrom, start, end, num_meioses, num_mutations", type=str, required=False)
+    parser.add_argument("--scale", help="Scale factor to equate means of the two datasets", type=float, default=1)
     args = parser.parse_args()
 
     # Load estimates and truth
     ests = pd.read_csv(args.ests, sep="\t", names=["chrom","start","end","logmu_est","beta_est","p_est","logmu_est_stderr","nsamp"])
-    truth = pd.read_csv(args.truth, sep="\t", names=["chrom","start","end","truth","lowbound","upbound"])
-    data = pd.merge(ests, truth, on=["chrom","start","end"])
-
-    # Scale to have same mean
-    scale = np.mean(data["truth"])/np.mean(10**data["logmu_est"])
-    data["truth"] = data["truth"]/scale
-    data["lowbound"] = data["lowbound"]/scale
-    data["upbound"] = data["upbound"]/scale
-    sys.stderr.write("Scale factor=%s\n"%scale)
+    if args.truth is not None:
+        truth = pd.read_csv(args.truth, sep="\t", names=["chrom","start","end","truth","lowbound","upbound"])
+        data = pd.merge(ests, truth, on=["chrom","start","end"])
+        # Scale to have same mean
+        scale = np.mean(data["truth"])/np.mean(10**data["logmu_est"])
+        data["truth"] = data["truth"]/scale
+        data["lowbound"] = data["lowbound"]/scale
+        data["upbound"] = data["upbound"]/scale
+        sys.stderr.write("Scale factor=%s\n"%scale)
+    else:
+        truth = pd.read_csv(args.truthnp, sep="\t", names=["chrom","start","end","n","x"])
+        data = pd.merge(ests, truth, on=["chrom","start","end"])
+        data["x"] = data["x"]*1.0/args.scale
 
     # Remove points with stderr=nan or stderr=0
     data = data[~np.isnan(data["logmu_est_stderr"])&(data["logmu_est_stderr"]!=0)]
 
     # Loop through fudge factors
-    for ff in np.arange(0.1, 20, 0.1):
-        # Method 1: use PDF mass overlap
-        coverage = GetCICoverage(data, ff)
-        # Method 2: sample from truth intervals
-        coverage2 = SampleCICoverage(data, ff)
-        sys.stdout.write("\t".join(map(str, [ff, coverage, coverage2]))+"\n")
+    if args.truth is not None: bins = np.arange(0.1, 20, 0.1)
+    else: bins = np.arange(0.1, 20, 0.1)
+    for ff in bins:
+        if args.truth is not None:
+            # Method 1: use PDF mass overlap
+            coverage = GetCICoverage(data, ff)
+            # Method 2: sample from truth intervals
+            coverage2 = SampleCICoverage(data, ff)
+            sys.stdout.write("\t".join(map(str, [ff, coverage, coverage2]))+"\n")
+        else:
+            coverage = GetNPCoverage(data, ff)
+            sys.stdout.write("\t".join(map(str, [ff, coverage]))+"\n")
     
 
 if __name__ == "__main__":
